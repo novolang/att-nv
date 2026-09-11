@@ -1,0 +1,194 @@
+// gatt — the declarations ATT reads, Core Vol 3 Part G.
+//
+// Every body is a `todo()`.  The signatures are the design; see the
+// README for the stamp.
+//
+// GATT is not a second protocol.  It is a set of RULES about what the
+// values in an attribute database mean: an attribute of type 0x2800
+// declares a service, one of type 0x2803 declares a characteristic and
+// says which handle holds its value, and a client discovers a profile
+// by reading those with the ATT requests in `att`.
+//
+// So this module has no PDUs.  It has the declarations as values, the
+// two functions that turn each into the bytes a `ReadByTypeResponse`
+// carries, and the two that read them back — which is exactly what a
+// client does.  A GATT server's dispatch loop, its notification
+// subscriptions and its prepared-write queue are the CALLER's: they
+// need state that outlives a request, and a `core` package that held
+// them would be holding a connection.
+
+// ── Assigned attribute types (Vol 3 Part G § 3) ─────────────────────
+
+// A primary service declaration.
+pub const UUID_PRIMARY_SERVICE = 0x2800
+
+// A secondary service declaration — one only included by another.
+pub const UUID_SECONDARY_SERVICE = 0x2801
+
+// An include declaration.
+pub const UUID_INCLUDE = 0x2802
+
+// A characteristic declaration.
+pub const UUID_CHARACTERISTIC = 0x2803
+
+// The Characteristic Extended Properties descriptor.
+pub const UUID_EXTENDED_PROPERTIES = 0x2900
+
+// The Characteristic User Description descriptor.
+pub const UUID_USER_DESCRIPTION = 0x2901
+
+// The Client Characteristic Configuration descriptor — the one a client
+// writes to turn notifications on.
+pub const UUID_CLIENT_CONFIGURATION = 0x2902
+
+// The Characteristic Presentation Format descriptor.
+pub const UUID_PRESENTATION_FORMAT = 0x2904
+
+// ── Characteristic properties (§ 3.3.1.1) ───────────────────────────
+
+// What a characteristic's value may be used for.
+//
+// A struct of `Bool`s rather than a bitfield because this is what a
+// reader of a profile writes down, and the byte is one function away.
+// `extended` says a Characteristic Extended Properties descriptor
+// exists and carries two more bits.
+pub struct GattProperties
+    broadcast: Bool
+    read: Bool
+    write_without_response: Bool
+    write: Bool
+    notify: Bool
+    indicate: Bool
+    authenticated_signed_writes: Bool
+    extended: Bool
+
+// The properties byte on the wire.
+pub fn properties_byte(properties: GattProperties) -> Int
+    todo("gatt.properties_byte")
+
+// The properties a byte names.
+pub fn properties_of(byte: Int) -> GattProperties
+    todo("gatt.properties_of")
+
+// ── Declarations ────────────────────────────────────────────────────
+
+// A service and the span of handles it covers (§ 3.1).
+//
+// `end_group_handle` is the last handle in the service, which is what a
+// Read By Group Type response reports and what tells a client where the
+// next service begins.
+pub struct GattService
+    declaration_handle: Int
+    end_group_handle: Int
+    uuid: AttUuid
+    primary: Bool
+
+// A characteristic: the declaration, the handle its value lives at, and
+// what may be done with it (§ 3.3).
+//
+// The two handles are separate fields because they are separate
+// attributes — the declaration is read to find the value, and a client
+// that confused them would read the declaration's own bytes as a
+// temperature.
+pub struct GattCharacteristic
+    declaration_handle: Int
+    value_handle: Int
+    properties: GattProperties
+    uuid: AttUuid
+
+// A descriptor: a handle and what it is (§ 3.3.3).
+pub struct GattDescriptor
+    handle: Int
+    uuid: AttUuid
+
+// What a client wrote to a Client Characteristic Configuration
+// descriptor (§ 3.3.3.3).
+//
+// Both false is the value that turns a subscription off, which is the
+// state a server must return to on a disconnection for a client that
+// did not bond.
+pub struct GattClientConfiguration
+    notify: Bool
+    indicate: Bool
+
+// The value of a service declaration: the service's UUID and nothing
+// else.
+pub fn service_declaration_value(service: GattService) -> [u8]
+    todo("gatt.service_declaration_value")
+
+// The value of a characteristic declaration: the properties byte, the
+// two little-endian bytes of the value handle, then the UUID.
+//
+// ```novo
+// use gatt
+//
+// fn heart_rate() -> GattCharacteristic
+//     GattCharacteristic {
+//         declaration_handle: 0x000F,
+//         value_handle: 0x0010,
+//         properties: gatt.properties_of(0x12),   // read | notify
+//         uuid: AttUuid16(0x2A37) }
+//
+// fn main() [io]
+//     let v = gatt.characteristic_declaration_value(heart_rate())
+//     println("${list.len(v)} bytes")   // 5: properties, handle, uuid
+// ```
+pub fn characteristic_declaration_value(characteristic: GattCharacteristic) -> [u8]
+    todo("gatt.characteristic_declaration_value")
+
+// Read a characteristic declaration a Read By Type response carried.
+//
+// `declaration_handle` is the handle the response paired with the
+// value; it is not in the value itself, which is why it is an argument
+// rather than something this could recover.
+pub fn read_characteristic_declaration(declaration_handle: Int,
+                                       value: [u8]) -> Result<GattCharacteristic, AttDecodeError>
+    todo("gatt.read_characteristic_declaration")
+
+// Read a service declaration a Read By Group Type response carried.
+pub fn read_service_declaration(declaration_handle: Int, end_group_handle: Int, primary: Bool,
+                                value: [u8]) -> Result<GattService, AttDecodeError>
+    todo("gatt.read_service_declaration")
+
+// The two little-endian bytes of a client configuration.
+pub fn client_configuration_value(configuration: GattClientConfiguration) -> [u8]
+    todo("gatt.client_configuration_value")
+
+// Read a client configuration a client wrote.
+//
+// Bits above the two defined ones are reserved, and a write that sets
+// one is `AttValueNotAllowed` on the wire — which is the caller's
+// answer to send, so this reports it as a decode failure rather than
+// masking the bits away.
+pub fn read_client_configuration(value: [u8]) -> Result<GattClientConfiguration, AttDecodeError>
+    todo("gatt.read_client_configuration")
+
+// ── Declarations as attributes ──────────────────────────────────────
+
+// A service's declaration as the row an `AttDatabase` holds.
+//
+// This and the two below are what turn a profile written as services
+// and characteristics into the table `att.database` takes, so a caller
+// writes the profile once rather than writing it and then writing its
+// handle layout.
+pub fn service_attribute(service: GattService) -> AttAttribute
+    todo("gatt.service_attribute")
+
+// A characteristic's DECLARATION as a row.  The value attribute is the
+// next one, and `characteristic_value_attribute` is it.
+pub fn characteristic_attribute(characteristic: GattCharacteristic) -> AttAttribute
+    todo("gatt.characteristic_attribute")
+
+// A characteristic's VALUE as a row, at `value_handle`.
+//
+// The permissions are the caller's: GATT says what a characteristic may
+// be used for and says nothing about what security it needs, and a
+// package that guessed would be inventing a policy.
+pub fn characteristic_value_attribute(characteristic: GattCharacteristic, value: [u8],
+                                      permissions: AttPermissions) -> AttAttribute
+    todo("gatt.characteristic_value_attribute")
+
+// A descriptor as a row.
+pub fn descriptor_attribute(descriptor: GattDescriptor, value: [u8],
+                            permissions: AttPermissions) -> AttAttribute
+    todo("gatt.descriptor_attribute")

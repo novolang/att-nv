@@ -1,0 +1,112 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of their own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  For ATT the claim is
+// what the package is for: the device on a coin cell is the SERVER, and
+// a GATT server that could not compile for one would have its whole
+// audience on the other side of the link.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the TIER: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a `Str` concatenation, a `Bytes`
+// call or an unbounded `while` wherever the implementation later puts
+// one.
+//
+// WHERE THE VALUES COME FROM.  At `@tier(embedded)` a list literal is
+// an implicit heap allocation and a boxed struct literal is a heap
+// cell, so a probe cannot write its own database down — the values have
+// to ARRIVE, which on a device they do, from flash and from the
+// connection.  `stored_database` and `received` stand where that
+// arrival is; their bodies are `todo()` like everything else here.
+//
+// `L2capFrame` comes from l2cap-nv through this package's dependency; a
+// type's identity is its name across the assembly, so naming the
+// package is not needed to spell it.
+
+use att
+use gatt
+
+// The database this device serves, as it would be built at boot from a
+// profile in flash.
+fn stored_database() -> AttDatabase
+    todo("probe.stored_database")
+
+// An ATT PDU the connection handed up.
+fn received() -> [u8]
+    todo("probe.received")
+
+// The frame l2cap-nv drained for the attribute channel.
+fn received_frame() -> L2capFrame
+    todo("probe.received_frame")
+
+// The type a client asked to discover.
+//
+// It ARRIVES rather than being written down, and not only because that
+// is what happens on a link: at `@tier(embedded)` a payload-carrying
+// enum variant is a heap cell, so `AttUuid16(0x2800)` is refused and a
+// device cannot spell a UUID at all today.  The README says what that
+// costs and what is filed about it.
+fn requested_type() -> AttUuid
+    todo("probe.requested_type")
+
+fn main() [hw, time]
+    let db = stored_database()
+    let mtu = att.negotiated_mtu(att.MTU_DEFAULT, 247)
+
+    // The opcode arithmetic, which is what a server's dispatch is.
+    if att.opcode_is_command(0x52)
+        hal.uart.write("att-nv: no answer owed\n")
+    if att.opcode_method(0xD2) == 0x12
+        hal.uart.write("att-nv: a signed write is a write\n")
+
+    // One decode, so the Result-returning half of the surface is
+    // compiled for the device too rather than only the total functions.
+    let decoded: Result<AttPdu, AttDecodeError> = att.decode(received())
+    match decoded
+        Err(_)  => hal.uart.write("att-nv: bad pdu\n")
+        Ok(pdu) =>
+            if att.is_request(pdu)
+                hal.uart.write("att-nv: request\n")
+
+    // And the channel check, which is the one that keeps a pairing PDU
+    // out of the attribute parser.
+    match att.from_frame(received_frame())
+        Err(_) => hal.uart.write("att-nv: not ours\n")
+        Ok(_)  => hal.uart.write("att-nv: ours\n")
+
+    // The walks: the database is a value in flash and the answer is a
+    // PDU, with nothing in between that this package owns.
+    let span = att.handle_range(db)
+    match att.read_by_group_type(db, span.first, span.last, requested_type(), mtu)
+        ReadByGroupTypeResponse(_, _) => hal.uart.write("att-nv: services\n")
+        ErrorResponse(_, _, _)        => hal.uart.write("att-nv: refused\n")
+        _                             => hal.uart.write("att-nv: unexpected\n")
+
+    match att.read(db, span.first, mtu)
+        ReadResponse(_)        => hal.uart.write("att-nv: value\n")
+        ErrorResponse(_, _, _) => hal.uart.write("att-nv: refused\n")
+        _                      => hal.uart.write("att-nv: unexpected\n")
+
+    // The declarations, which is the half of this package a server
+    // reads out of flash rather than off the wire.
+    let properties = gatt.properties_of(0x12)
+    if properties.notify
+        hal.uart.write("att-nv: notifiable\n")
+    if gatt.properties_byte(properties) == 0x12
+        hal.uart.write("att-nv: read and notify\n")
+
+    // The permission rule, which takes the link's security state as
+    // arguments because a core package cannot know it.
+    match att.permission_error(db, span.first, true, false, false, 0)
+        None    => hal.uart.write("att-nv: writable\n")
+        Some(_) => hal.uart.write("att-nv: refused\n")
+
+    loop
+        core.rt.sleep_ms(1000)

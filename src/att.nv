@@ -1,0 +1,489 @@
+// att — the Bluetooth Attribute Protocol, with no radio and no server
+// loop around it.
+//
+// Every body is a `todo()`.  The signatures and the effect rows are the
+// design, and the compiler checks them as claims; see the README for
+// the stamp.
+//
+// Core Vol 3 Part F.  ATT is twenty-odd request/response pairs over one
+// L2CAP channel, plus the two server-initiated PDUs — a notification,
+// which is unacknowledged, and an indication, which is not.  Everything
+// it does is arithmetic over a table of (handle, type, value) rows, and
+// the table belongs to the caller.
+//
+// All multi-byte fields are little-endian, which is the Bluetooth
+// convention throughout.  Handles are 16 bits and 0x0000 is reserved.
+//
+// `L2capFrame` is l2cap-nv's, named by `frame` and `from_frame`.  There
+// is no `use l2cap` line because a type's identity is its NAME across
+// the whole assembly: the dependency in novo.toml brings the
+// declaration in, and a `use` would only be needed to reach that
+// package's functions, which this one does not call.
+
+// ── The channel and the MTU (§ 3.2.8, § 3.4.2) ──────────────────────
+
+// The L2CAP channel ATT runs on, which is l2cap-nv's `CID_ATT`.
+pub const CID = 0x0004
+
+// The MTU every link starts at, before an exchange raises it (§ 5.2.1).
+//
+// 23 is not a round number by accident: it is the 27-byte link-layer
+// payload less the four-byte L2CAP header, so a 23-byte ATT PDU is the
+// largest one that never needs fragmenting.
+pub const MTU_DEFAULT = 23
+
+// The smallest MTU a peer may ask for.  A request below this is a
+// protocol violation, not a negotiation.
+pub const MTU_MINIMUM = 23
+
+// The MTU two peers settled on: the smaller of what each offered.
+//
+// Both arguments are the values in the Exchange MTU request and
+// response, and the answer is `MTU_DEFAULT` if either side asked for
+// less than the minimum — a peer that asks for twelve gets the floor
+// rather than a link that cannot carry a read response.
+pub fn negotiated_mtu(client_rx_mtu: Int, server_rx_mtu: Int) -> Int
+    todo("att.negotiated_mtu")
+
+// ── UUIDs ───────────────────────────────────────────────────────────
+
+// An attribute type, a service type or a characteristic type.
+//
+// The two widths are separate variants rather than sixteen bytes with a
+// convention, because the wire format distinguishes them everywhere: a
+// Find Information response says which format its pairs are in, and a
+// Read By Type request is one length or the other.
+pub enum AttUuid
+    // A 16-bit UUID from the assigned-numbers list — 0x2800 and its
+    // neighbours.
+    AttUuid16(value: Int)
+    // A full 128-bit UUID, sixteen bytes in the little-endian order the
+    // wire uses.
+    AttUuid128(bytes: [u8])
+
+// Which of the two widths a Find Information response used (§ 3.4.3.2).
+pub enum AttInfoFormat
+    AttUuid16Format
+    AttUuid128Format
+
+// The UUID as its wire bytes: two little-endian bytes, or sixteen.
+pub fn encode_uuid(uuid: AttUuid) -> [u8]
+    todo("att.encode_uuid")
+
+// Read a UUID from its wire bytes.
+//
+// The width is the buffer's length: two bytes are a 16-bit UUID and
+// sixteen are a full one.  Any other length is `AttBadUuidLength`.
+pub fn decode_uuid(bytes: [u8]) -> Result<AttUuid, AttDecodeError>
+    todo("att.decode_uuid")
+
+// Whether two UUIDs name the same type.
+//
+// A 16-bit UUID and the 128-bit form of the same assigned number are
+// the same type, and this says so: the Bluetooth base UUID is expanded
+// before the comparison, which is the rule a server that compared bytes
+// would get wrong for a client that spelled its filter out in full.
+pub fn uuid_eq(a: AttUuid, b: AttUuid) -> Bool
+    todo("att.uuid_eq")
+
+// ── Error codes (§ 3.4.1.1, Table 3.4) ──────────────────────────────
+
+// The reason an Error Response carries.
+//
+// The named codes are the specification's.  Two ranges stay numbers
+// because they belong to somebody else: `AttApplicationError` is
+// 0x80..0x9F, which a profile defines, and `AttCommonProfileError` is
+// 0xE0..0xFF, which the Core Specification Supplement does.
+pub enum AttErrorCode
+    AttInvalidHandle
+    AttReadNotPermitted
+    AttWriteNotPermitted
+    AttInvalidPdu
+    AttInsufficientAuthentication
+    AttRequestNotSupported
+    AttInvalidOffset
+    AttInsufficientAuthorization
+    AttPrepareQueueFull
+    AttAttributeNotFound
+    AttAttributeNotLong
+    AttInsufficientEncryptionKeySize
+    AttInvalidAttributeValueLength
+    AttUnlikelyError
+    AttInsufficientEncryption
+    AttUnsupportedGroupType
+    AttInsufficientResources
+    AttDatabaseOutOfSync
+    AttValueNotAllowed
+    AttApplicationError(code: Int)
+    AttCommonProfileError(code: Int)
+    AttReservedError(code: Int)
+
+// The byte an error code is on the wire.
+pub fn error_code_value(code: AttErrorCode) -> Int
+    todo("att.error_code_value")
+
+// The error code a byte names.
+//
+// Total: every byte is one of the named codes or one of the three
+// ranges, so a peer that invents a code is reported rather than
+// dropped.
+pub fn error_code_of(byte: Int) -> AttErrorCode
+    todo("att.error_code_of")
+
+// ── Reading a PDU ───────────────────────────────────────────────────
+
+// Why a PDU could not be read.
+//
+// Distinct from `AttErrorCode`, which is what goes back to the PEER.
+// The two are related but not the same: a client that sends a
+// three-byte Read Request has sent something this package cannot parse
+// (`AttPduTooShort`) AND something the server owes an Error Response
+// for (`AttInvalidPdu`), and collapsing them would mean either losing
+// the length that was wrong or putting a parse detail on the air.
+pub enum AttDecodeError
+    // Fewer bytes than the opcode's fixed part needs.
+    AttPduTooShort(have: Int, need: Int)
+    // An opcode this package does not know.  The server owes a
+    // `AttRequestNotSupported` and this is the byte to quote in it.
+    AttUnknownOpcode(opcode: Int)
+    // A response whose length is not a whole number of its own records
+    // — a Read By Type response with a pair length of six and
+    // seventeen bytes of data.
+    AttRaggedList(unit: Int, actual: Int)
+    // A UUID field that is neither two bytes nor sixteen.
+    AttBadUuidLength(length: Int)
+    // A frame that arrived on a channel that is not `CID`.
+    AttWrongChannel(cid: Int)
+    // A value longer than the MTU allows.
+    AttOverMtu(length: Int, mtu: Int)
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, AttDecodeError>` requires it: SPEC § 3.4 admits a `Result`
+// error type only if it implements `Error`.
+impl Error for AttDecodeError
+    fn message(self) -> Str
+        todo("att.AttDecodeError.message")
+
+// ── The PDUs (§ 3.4) ────────────────────────────────────────────────
+
+// Which of the two flags an Execute Write Request carries (§ 3.4.6.3).
+pub enum AttExecuteFlag
+    AttCancelPrepared
+    AttWritePrepared
+
+// One handle and the value read from it, as a Read Multiple Variable
+// response carries them (§ 3.4.4.13).
+pub struct AttHandleValue
+    handle: Int
+    value: [u8]
+
+// Every ATT PDU, both directions.
+//
+// One enum rather than two because a link carries both directions and a
+// capture tool, a test and a conformance harness all want to name what
+// went past without first deciding who sent it.  Which side may send
+// which is a rule about the LINK, not about the bytes.
+//
+// The list-shaped responses — Find Information, Find By Type Value,
+// Read By Type, Read By Group Type — carry their records as `data`
+// with the record width beside it rather than as a list of structs.
+// That is the wire format and it is also the only shape that lets a
+// server fill a buffer to the MTU and stop: a list of structs would
+// have to be built whole and then measured, and on a device the whole
+// is what does not fit.
+pub enum AttPdu
+    ErrorResponse(request_opcode: Int, handle: Int, code: AttErrorCode)
+    ExchangeMtuRequest(client_rx_mtu: Int)
+    ExchangeMtuResponse(server_rx_mtu: Int)
+    FindInformationRequest(starting_handle: Int, ending_handle: Int)
+    FindInformationResponse(format: AttInfoFormat, data: [u8])
+    FindByTypeValueRequest(starting_handle: Int, ending_handle: Int, attribute_type: Int,
+                           attribute_value: [u8])
+    FindByTypeValueResponse(data: [u8])
+    ReadByTypeRequest(starting_handle: Int, ending_handle: Int, attribute_type: AttUuid)
+    ReadByTypeResponse(pair_length: Int, data: [u8])
+    ReadRequest(handle: Int)
+    ReadResponse(value: [u8])
+    ReadBlobRequest(handle: Int, offset: Int)
+    ReadBlobResponse(part: [u8])
+    ReadMultipleRequest(handles: [Int])
+    ReadMultipleResponse(values: [u8])
+    ReadByGroupTypeRequest(starting_handle: Int, ending_handle: Int, group_type: AttUuid)
+    ReadByGroupTypeResponse(triplet_length: Int, data: [u8])
+    WriteRequest(handle: Int, value: [u8])
+    WriteResponse
+    WriteCommand(handle: Int, value: [u8])
+    SignedWriteCommand(handle: Int, value: [u8], signature: [u8])
+    PrepareWriteRequest(handle: Int, offset: Int, part: [u8])
+    PrepareWriteResponse(handle: Int, offset: Int, part: [u8])
+    ExecuteWriteRequest(flag: AttExecuteFlag)
+    ExecuteWriteResponse
+    HandleValueNotification(handle: Int, value: [u8])
+    HandleValueIndication(handle: Int, value: [u8])
+    HandleValueConfirmation
+
+// The PDU as its wire bytes: the opcode, then its parameters.
+pub fn encode(pdu: AttPdu) -> [u8]
+    todo("att.encode")
+
+// Read a PDU from an L2CAP payload.
+//
+// `bytes` is the payload of a frame on `CID`, with the four-byte L2CAP
+// header already off.
+pub fn decode(bytes: [u8]) -> Result<AttPdu, AttDecodeError>
+    todo("att.decode")
+
+// The opcode byte a PDU carries.
+pub fn opcode(pdu: AttPdu) -> Int
+    todo("att.opcode")
+
+// The six-bit method of an opcode (§ 3.3.1).
+//
+// The top two bits are the command and signed flags, so a Write Request
+// and a Write Command differ in one bit and share a method; this is the
+// part a dispatch table indexes.
+pub fn opcode_method(opcode: Int) -> Int
+    todo("att.opcode_method")
+
+// Whether an opcode's command bit is set — a PDU the peer expects no
+// answer to.
+pub fn opcode_is_command(opcode: Int) -> Bool
+    todo("att.opcode_is_command")
+
+// Whether an opcode's authentication-signature bit is set.
+pub fn opcode_is_signed(opcode: Int) -> Bool
+    todo("att.opcode_is_signed")
+
+// Whether a PDU is a request the peer owes exactly one answer to.
+//
+// This is what a client's outstanding-request rule is written against:
+// ATT allows one at a time per link, and a client that sends a second
+// before the first is answered has broken the protocol.  The rule is
+// the caller's to enforce; this is the predicate it needs.
+pub fn is_request(pdu: AttPdu) -> Bool
+    todo("att.is_request")
+
+// The PDU as a frame on ATT's channel, ready for l2cap-nv to encode.
+pub fn frame(pdu: AttPdu) -> L2capFrame
+    todo("att.frame")
+
+// Read a PDU out of an L2CAP frame.
+//
+// Refuses `AttWrongChannel` for a frame on any CID but `CID`, so a
+// stack that mis-routes a signalling frame finds out here rather than
+// in a parse of pairing bytes as an opcode.
+//
+// ```novo
+// use att
+//
+// fn main() [io]
+//     let f = L2capFrame { cid: 0x0004, payload: [0x0A as u8, 0x03 as u8, 0x00 as u8] }
+//     match att.from_frame(f)
+//         Err(e)  => println("not an ATT pdu: ${e.message()}")
+//         Ok(pdu) =>
+//             match pdu
+//                 ReadRequest(handle) => println("read handle ${handle}")
+//                 _                   => println("something else")
+// ```
+pub fn from_frame(frame: L2capFrame) -> Result<AttPdu, AttDecodeError>
+    todo("att.from_frame")
+
+// ── The attribute database ──────────────────────────────────────────
+//
+// A server's database is a table of rows ordered by handle, and every
+// ATT discovery request is a walk over it.  The table is a VALUE the
+// caller holds: this package neither stores it nor owns the bytes of a
+// value, so the same walk runs over a database in flash, one built at
+// boot, and one a test wrote down.
+
+// What a client may do with an attribute, and what it must have done
+// first (§ 3.2.5).
+//
+// The permissions are the SERVER's policy, not the protocol's, which is
+// why they are a struct rather than a bitfield on the wire: nothing
+// here is transmitted.  `minimum_key_size` is in octets, 7 to 16, and
+// 0 means no requirement.
+pub struct AttPermissions
+    readable: Bool
+    writable: Bool
+    encryption_required: Bool
+    authentication_required: Bool
+    authorization_required: Bool
+    minimum_key_size: Int
+
+// One row: a handle, what it is, and what it holds (§ 3.2.1).
+//
+// `end_group_handle` is meaningful only for a grouping attribute — a
+// service declaration — and is the handle of the last attribute in the
+// group.  For everything else it equals `handle`, which is what makes
+// `read_by_group_type` a single arithmetic rule rather than a special
+// case per type.
+pub struct AttAttribute
+    handle: Int
+    attribute_type: AttUuid
+    value: [u8]
+    end_group_handle: Int
+    permissions: AttPermissions
+
+// A server's attribute table.
+//
+// Opaque, and a value: a caller holds one and this package holds
+// nothing.  `database` is what builds it, and it is where the ordering
+// invariant is established — every walk below assumes handles ascend.
+pub struct AttDatabase
+    attributes: [AttAttribute]
+
+// The span of handles a database covers.
+//
+// `first` and `last` are both inclusive; an empty database reports
+// `first` greater than `last`, which is the only pair of numbers that
+// cannot be a real range.
+pub struct AttHandleRange
+    first: Int
+    last: Int
+
+// A database from its rows.
+//
+// Rows arrive in any order and come out sorted by handle, because every
+// walk below is a range scan and a table that is not sorted answers the
+// wrong question quietly.  Two rows claiming the same handle are not a
+// table at all and are refused, which is why this returns a `Result`.
+pub fn database(attributes: [AttAttribute]) -> Result<AttDatabase, AttDecodeError>
+    todo("att.database")
+
+// How many rows the database holds.
+pub fn attribute_count(db: AttDatabase) -> Int
+    todo("att.attribute_count")
+
+// The row at a handle, or `None` when no attribute has it.
+pub fn attribute_at(db: AttDatabase, handle: Int) -> ?AttAttribute
+    todo("att.attribute_at")
+
+// The span of handles the database covers.
+pub fn handle_range(db: AttDatabase) -> AttHandleRange
+    todo("att.handle_range")
+
+// The rows whose handles fall inside a request's range, in order.
+//
+// The shared first step of every discovery walk, exposed because a
+// caller that implements a request this package does not model still
+// needs the range rule — and because getting it wrong at the ends is
+// the classic ATT server bug: both handles are INCLUSIVE.
+pub fn attributes_in_range(db: AttDatabase, starting_handle: Int,
+                           ending_handle: Int) -> [AttAttribute]
+    todo("att.attributes_in_range")
+
+// ── The walks a GATT server performs ────────────────────────────────
+//
+// Each of these takes the request's fields and the MTU and returns the
+// PDU that answers it — a response filled to the MTU, or the Error
+// Response the specification requires.  Returning the error PDU rather
+// than a `Result` is deliberate: the peer is owed an answer either way,
+// and a caller that had to turn a refusal into an Error Response itself
+// would be writing the protocol a second time.
+
+// Find Information: handle-and-UUID pairs over a range (§ 3.4.3.1).
+//
+// The response is in one format for all its pairs, which is the
+// specification's rule and the reason a database that mixes 16-bit and
+// 128-bit types stops at the first change of width.
+pub fn find_information(db: AttDatabase, starting_handle: Int, ending_handle: Int,
+                        mtu: Int) -> AttPdu
+    todo("att.find_information")
+
+// Find By Type Value: the handle groups whose type and value both match
+// (§ 3.4.3.3).
+//
+// This is how a client discovers a service by its UUID, and the
+// `attribute_type` is a 16-bit UUID because the request has no room for
+// a longer one — a 128-bit service is found by reading the values
+// instead.
+pub fn find_by_type_value(db: AttDatabase, starting_handle: Int, ending_handle: Int,
+                          attribute_type: Int, attribute_value: [u8], mtu: Int) -> AttPdu
+    todo("att.find_by_type_value")
+
+// Read By Type: handle-and-value pairs for one attribute type
+// (§ 3.4.4.1).
+//
+// Every pair in a response is the same length, so the walk stops at the
+// first attribute whose value length differs from the first one's —
+// which is the rule a server that only checked the MTU gets wrong.
+pub fn read_by_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
+                    attribute_type: AttUuid, mtu: Int) -> AttPdu
+    todo("att.read_by_type")
+
+// Read By Group Type: handle, end-group handle and value, for a
+// grouping type (§ 3.4.4.9).
+//
+// Only a grouping type is legal here — `UUID_PRIMARY_SERVICE` and
+// `UUID_SECONDARY_SERVICE` — and anything else is answered with
+// `AttUnsupportedGroupType`.
+//
+// ```novo
+// use att
+//
+// // The answer is a PDU either way, because the peer is owed one
+// // either way: a refusal is an Error Response and not a Result.
+// fn discover(db: AttDatabase, mtu: Int) -> [u8]
+//     let answer = att.read_by_group_type(db, 0x0001, 0xFFFF, AttUuid16(0x2800), mtu)
+//     att.encode(answer)
+// ```
+pub fn read_by_group_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
+                          group_type: AttUuid, mtu: Int) -> AttPdu
+    todo("att.read_by_group_type")
+
+// Read: the whole value at a handle, truncated to the MTU (§ 3.4.4.3).
+pub fn read(db: AttDatabase, handle: Int, mtu: Int) -> AttPdu
+    todo("att.read")
+
+// Read Blob: the value at a handle from an offset (§ 3.4.4.5).
+//
+// An offset past the end of the value is `AttInvalidOffset`; an offset
+// exactly at the end is an empty Read Blob Response, which is how a
+// client learns it has the whole value.
+pub fn read_blob(db: AttDatabase, handle: Int, offset: Int, mtu: Int) -> AttPdu
+    todo("att.read_blob")
+
+// Read Multiple: the values at several handles, concatenated
+// (§ 3.4.4.7).
+//
+// The response has no lengths in it, so a client that did not already
+// know each value's length cannot split the answer.  That is the
+// specification's design and this package reproduces it rather than
+// improving it.
+pub fn read_multiple(db: AttDatabase, handles: [Int], mtu: Int) -> AttPdu
+    todo("att.read_multiple")
+
+// The Error Response a request would be refused with, or `None` when
+// the permissions allow it.
+//
+// The security state is the CALLER's: this package has no idea whether
+// the link is encrypted or the peer authenticated, so it is told.  That
+// is what keeps the permission rule in one place instead of repeated at
+// every walk above.
+pub fn permission_error(db: AttDatabase, handle: Int, writing: Bool, encrypted: Bool,
+                        authenticated: Bool, key_size: Int) -> ?AttErrorCode
+    todo("att.permission_error")
+
+// The database with one value replaced, for a write that the
+// permissions allow.
+//
+// Returns the new database and the PDU the peer is owed — a Write
+// Response, or the Error Response the refusal requires. A value of a
+// different length than the attribute held is refused with
+// `AttInvalidAttributeValueLength`, because a fixed-width
+// characteristic that silently changed width is how a client's next
+// read stops parsing.
+pub struct AttWriteOutcome
+    database: AttDatabase
+    answer: AttPdu
+
+// Apply a Write Request or a Write Command to the database.
+//
+// `writing` permissions and the link's security state are checked
+// first, through the same rule `permission_error` states.
+pub fn write(db: AttDatabase, handle: Int, value: [u8], encrypted: Bool, authenticated: Bool,
+             key_size: Int) -> AttWriteOutcome
+    todo("att.write")

@@ -1,0 +1,169 @@
+// tests/gatt_tests.nv — the API tests for the declarations, written
+// against the signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// gatt.<fn>` from the `todo()` that is each body.
+//
+// The byte strings are Core Vol 3 Part G § 3: the characteristic
+// declaration whose value is properties, value handle and UUID, and the
+// Client Characteristic Configuration descriptor a client writes to
+// turn notifications on.
+
+use std.test
+use gatt
+
+// Read and Notify — the Heart Rate Measurement characteristic's
+// properties, which is 0x12 on the wire.
+fn read_and_notify() -> GattProperties
+    GattProperties {
+        broadcast: false,
+        read: true,
+        write_without_response: false,
+        write: false,
+        notify: true,
+        indicate: false,
+        authenticated_signed_writes: false,
+        extended: false }
+
+fn heart_rate_measurement() -> GattCharacteristic
+    GattCharacteristic {
+        declaration_handle: 0x000F,
+        value_handle: 0x0010,
+        properties: read_and_notify(),
+        uuid: AttUuid16(0x2A37) }
+
+fn heart_rate_service() -> GattService
+    GattService {
+        declaration_handle: 0x000E,
+        end_group_handle: 0x0011,
+        uuid: AttUuid16(0x180D),
+        primary: true }
+
+fn readable() -> AttPermissions
+    AttPermissions {
+        readable: true,
+        writable: false,
+        encryption_required: false,
+        authentication_required: false,
+        authorization_required: false,
+        minimum_key_size: 0 }
+
+@test
+fn test_the_assigned_types_are_the_specification_s()
+    // Real today: the constants are the one part of an interface that
+    // needs no body.
+    test.assert_eq(gatt.UUID_PRIMARY_SERVICE, 0x2800)
+    test.assert_eq(gatt.UUID_SECONDARY_SERVICE, 0x2801)
+    test.assert_eq(gatt.UUID_INCLUDE, 0x2802)
+    test.assert_eq(gatt.UUID_CHARACTERISTIC, 0x2803)
+    test.assert_eq(gatt.UUID_CLIENT_CONFIGURATION, 0x2902)
+
+@test
+fn test_read_and_notify_is_0x12()
+    test.assert_eq(gatt.properties_byte(read_and_notify()), 0x12)
+    let back = gatt.properties_of(0x12)
+    test.assert(back.read)
+    test.assert(back.notify)
+    test.assert(not back.write)
+    test.assert(not back.indicate)
+
+@test
+fn test_a_service_declaration_is_its_uuid_and_nothing_else()
+    let value = gatt.service_declaration_value(heart_rate_service())
+    test.assert_eq(list.len(value), 2)
+    test.assert_eq(value[0] as Int, 0x0D)
+    test.assert_eq(value[1] as Int, 0x18)
+
+@test
+fn test_a_characteristic_declaration_is_properties_handle_and_uuid()
+    // 12 10 00 37 2A — read|notify, value at 0x0010, UUID 0x2A37.
+    let value = gatt.characteristic_declaration_value(heart_rate_measurement())
+    test.assert_eq(list.len(value), 5)
+    test.assert_eq(value[0] as Int, 0x12)
+    test.assert_eq(value[1] as Int, 0x10)
+    test.assert_eq(value[2] as Int, 0x00)
+    test.assert_eq(value[3] as Int, 0x37)
+    test.assert_eq(value[4] as Int, 0x2A)
+
+@test
+fn test_a_characteristic_declaration_round_trips()
+    let value = gatt.characteristic_declaration_value(heart_rate_measurement())
+    match gatt.read_characteristic_declaration(0x000F, value)
+        Err(_)   => test.fail("what the builder wrote, the reader reads")
+        Ok(back) =>
+            test.assert_eq(back.declaration_handle, 0x000F)
+            test.assert_eq(back.value_handle, 0x0010)
+            test.assert(back.properties.notify)
+
+@test
+fn test_a_declaration_too_short_to_hold_a_uuid_is_refused()
+    match gatt.read_characteristic_declaration(0x000F, [0x12 as u8, 0x10 as u8])
+        Ok(_)  => test.fail("three bytes precede the UUID and none is here")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_service_declaration_round_trips()
+    let value = gatt.service_declaration_value(heart_rate_service())
+    match gatt.read_service_declaration(0x000E, 0x0011, true, value)
+        Err(_)   => test.fail("two bytes are a 16-bit service UUID")
+        Ok(back) =>
+            test.assert_eq(back.declaration_handle, 0x000E)
+            test.assert_eq(back.end_group_handle, 0x0011)
+            test.assert(back.primary)
+
+@test
+fn test_the_configuration_a_client_writes_to_subscribe()
+    // 01 00 turns notifications on; 02 00 turns indications on.
+    let notifying = GattClientConfiguration { notify: true, indicate: false }
+    let value = gatt.client_configuration_value(notifying)
+    test.assert_eq(list.len(value), 2)
+    test.assert_eq(value[0] as Int, 0x01)
+    test.assert_eq(value[1] as Int, 0x00)
+    match gatt.read_client_configuration(value)
+        Err(_)   => test.fail("01 00 is a subscription to notifications")
+        Ok(back) =>
+            test.assert(back.notify)
+            test.assert(not back.indicate)
+
+@test
+fn test_a_reserved_bit_in_a_configuration_is_refused()
+    // Bits above the two defined ones are reserved, and a write that
+    // sets one is Value Not Allowed on the air — so it is reported
+    // rather than masked away.
+    match gatt.read_client_configuration([0x04 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("bit 2 of the configuration is reserved")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_service_becomes_the_row_a_database_holds()
+    let a = gatt.service_attribute(heart_rate_service())
+    test.assert_eq(a.handle, 0x000E)
+    test.assert_eq(a.end_group_handle, 0x0011)
+    match a.attribute_type
+        AttUuid16(v) => test.assert_eq(v, gatt.UUID_PRIMARY_SERVICE)
+        _            => test.fail("a service declaration's TYPE is 0x2800")
+
+@test
+fn test_a_characteristic_becomes_two_rows()
+    // The declaration, and the value one handle later.  A client that
+    // confused them would read the declaration's own bytes as a heart
+    // rate.
+    let declaration = gatt.characteristic_attribute(heart_rate_measurement())
+    test.assert_eq(declaration.handle, 0x000F)
+    match declaration.attribute_type
+        AttUuid16(v) => test.assert_eq(v, gatt.UUID_CHARACTERISTIC)
+        _            => test.fail("a characteristic declaration's TYPE is 0x2803")
+    let value = gatt.characteristic_value_attribute(heart_rate_measurement(),
+                                                    [0x00 as u8, 0x3C as u8], readable())
+    test.assert_eq(value.handle, 0x0010)
+    match value.attribute_type
+        AttUuid16(v) => test.assert_eq(v, 0x2A37)
+        _            => test.fail("a value attribute's type is the characteristic's UUID")
+
+@test
+fn test_a_descriptor_becomes_a_row_with_the_permissions_the_caller_gave()
+    let cccd = GattDescriptor { handle: 0x0011, uuid: AttUuid16(gatt.UUID_CLIENT_CONFIGURATION) }
+    let a = gatt.descriptor_attribute(cccd, [0x00 as u8, 0x00 as u8], readable())
+    test.assert_eq(a.handle, 0x0011)
+    test.assert(a.permissions.readable)
+    test.assert(not a.permissions.writable)
