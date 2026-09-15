@@ -1,6 +1,6 @@
 [package]
 name        = "att-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The Bluetooth Attribute Protocol with no radio: every ATT PDU as a typed value both directions, the MTU exchange, and the attribute-database walk a GATT server performs as arithmetic over a database the caller holds.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 

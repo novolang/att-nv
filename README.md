@@ -1,189 +1,317 @@
 # att-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+The Attribute Protocol (ATT) is how one Bluetooth device reads and
+writes the values another one publishes. It is specified in the
+[Bluetooth Core Specification](https://www.bluetooth.com/specifications/specs/core-specification/),
+Volume 3, Part F. This package brings it to novo-lang with no radio and
+no server loop around it, together with the Generic Attribute Profile
+(GATT) declarations of Volume 3, Part G that give those values their
+meaning. It runs on a channel that
+[l2cap-nv](https://novo-lang.org/packages/l2cap-nv) provides and depends
+on that package for it.
+[smp-nv](https://novo-lang.org/packages/smp-nv) is its sibling, the
+Security Manager, on the next channel along.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`.  Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is declared
+with its full signature, but every body is a `todo()` that panics when
+called. The package is published so its design can be reviewed and
+depended on before it is implemented. Version 0.1.0 will be the first
+working release.
 
-## What this is
+## What the Attribute Protocol is
 
-The Bluetooth Attribute Protocol with no radio and no server loop
-around it (Core Vol 3 Part F): every ATT PDU as a typed value in both
-directions, the MTU exchange, and the attribute-database walk a GATT
-server performs — find-by-type, read-by-type, read-by-group-type, the
-handle ranges — as arithmetic over a database the caller holds.  Beside
-it, `gatt` carries the declarations ATT reads (Core Vol 3 Part G): the
-service and characteristic declarations as values, and the two
-functions each way between them and the bytes a response carries.
+A device that has something to publish holds a table. Each row is an
+**attribute**: a 16-bit **handle** that names it, a **type** that says
+what it is, a value, and the permissions a server enforces before
+letting a peer near it. The type is a **UUID**, either two bytes from
+the Bluetooth assigned-numbers list or a full sixteen. Handle 0x0000 is
+reserved, so a real attribute's handle is 0x0001 or above.
 
-It sits above l2cap-nv and speaks its vocabulary: `frame` produces an
-`L2capFrame` on CID 0x0004 and `from_frame` refuses one on any other
-channel, so the two packages share one spelling of a channel and a
-payload.
+The protocol over that table is twenty-odd request and response pairs on
+one L2CAP channel. A **client** sends a request and the **server**
+answers it, or answers an **Error Response** saying why not. Two further
+kinds of message exist. A **command** expects no answer at all. A
+**notification** is the server pushing a value out unacknowledged, and
+an **indication** is the same push with a confirmation owed back.
 
-## Adding it, and checking it
+Every message starts with one **opcode** byte. Its low six bits are the
+**method**, which says which of the twenty-odd messages it is. The top
+two bits are flags: 0x40 marks a command and 0x80 marks a message
+carrying a twelve-byte authentication signature. Section 3.3.1 defines
+the layout.
 
-```bash
-novo pkg add att-nv            # into your novo.toml
-novo pkg build                 # type- and effect-check the package
-novo test tests/att_tests.nv
-novo test tests/gatt_tests.nv
+| Quantity | Value |
+| --- | --- |
+| The channel ATT runs on | CID 0x0004 |
+| A handle | 16 bits, 0x0000 reserved |
+| A UUID | 2 bytes or 16 bytes |
+| The opcode's method | The low 6 bits |
+| The command flag | 0x40 |
+| The authentication-signature flag | 0x80 |
+| An authentication signature | 12 bytes |
+| The default and minimum MTU | 23 bytes |
+
+The **maximum transmission unit** (MTU) is the largest PDU the two peers
+have agreed to exchange. Every link starts at 23 bytes, which is the
+27-byte link-layer payload less the four-byte L2CAP header, so a 23-byte
+ATT PDU is the largest one that never needs fragmenting. The Exchange
+MTU request and response each offer a number, and the smaller of the two
+is what the link uses (section 3.4.2).
+
+GATT is not a second protocol. It is a set of rules about what the
+values in the table mean. An attribute of type 0x2800 declares a
+**service**, a group of related attributes. One of type 0x2803 declares
+a **characteristic** and says which handle holds its value and what may
+be done with it. A client discovers a whole profile by reading those
+with ordinary ATT requests. Volume 3, Part G section 3 assigns the
+numbers.
+
+| Type | Declares |
+| --- | --- |
+| 0x2800 | A primary service |
+| 0x2801 | A secondary service, one only another service includes |
+| 0x2802 | An include, one service inside another |
+| 0x2803 | A characteristic, with its value handle and properties |
+| 0x2900 | The Characteristic Extended Properties descriptor |
+| 0x2901 | The Characteristic User Description descriptor |
+| 0x2902 | The Client Characteristic Configuration descriptor, which a client writes to turn notifications on |
+| 0x2904 | The Characteristic Presentation Format descriptor |
+
+This package performs no input or output, and it keeps nothing between
+requests. The table is a value the caller holds, and every discovery
+request is a range scan over it, so the same walk runs over a database
+in flash, one built at boot and one a test wrote down.
+
+## Install
+
+```
+novo pkg add att-nv
 ```
 
-`novo test` is red today and that is the point of the release: every
-assertion below the first constants fails with `not implemented:
-att.<fn>`.  They turn green one at a time as bodies land.
-
-## The one example that will work
+## Example
 
 ```novo
 use att
-use gatt
 
-// A server's whole request path: a frame arrives, a PDU comes back.
-// There is nothing between them that this package owns.
-fn on_frame(db: AttDatabase, mtu: Int, f: L2capFrame) -> ?L2capFrame
-    match att.from_frame(f)
-        Err(_)  => None
-        Ok(pdu) =>
-            match pdu
-                ExchangeMtuRequest(_)              => Some(att.frame(ExchangeMtuResponse(mtu)))
-                ReadRequest(handle)                => Some(att.frame(att.read(db, handle, mtu)))
-                ReadByGroupTypeRequest(s, e, kind) =>
-                    Some(att.frame(att.read_by_group_type(db, s, e, kind, mtu)))
-                _                                  => None
+fn main() [io]
+    // What a client may do with an attribute, and what it must have done
+    // first. None of this goes on the wire.
+    let readable = AttPermissions {
+        readable: true, writable: false,
+        encryption_required: false, authentication_required: false,
+        authorization_required: false, minimum_key_size: 0 }
+
+    // One row of a server's table: handle 0x0003 holds the manufacturer
+    // name, whose assigned type number is 0x2A29.
+    let row = AttAttribute {
+        handle: 0x0003,
+        attribute_type: AttUuid16(0x2A29),
+        value: [0x6E as u8, 0x6F as u8, 0x76 as u8, 0x6F as u8],
+        end_group_handle: 0x0003,
+        permissions: readable }
+
+    // A Read Request for that handle, as it arrives on CID 0x0004.
+    let f = L2capFrame { cid: att.CID, payload: [0x0A as u8, 0x03 as u8, 0x00 as u8] }
+
+    match att.database([row])
+        Err(e) => println("these rows are not a table: ${e.message()}")
+        Ok(db) =>
+            match att.from_frame(f)
+                Err(e)  => println("not an ATT pdu: ${e.message()}")
+                Ok(pdu) =>
+                    match pdu
+                        ReadRequest(handle) =>
+                            // The walk answers with the PDU the peer is
+                            // owed, which is an Error Response when the
+                            // handle is not in the table.
+                            let answer = att.read(db, handle, att.MTU_DEFAULT)
+                            println("${list.len(att.encode(answer))} bytes go back")
+                        _ => println("some other request")
 ```
 
-## The layer, and why
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a `not implemented: att.<fn>`
+panic. The tests are the specification the implementation will have to
+satisfy.
 
-`core`.  Every walk is a range scan over a list the caller owns, every
-PDU is bytes in and bytes out, and the server keeps nothing between
-requests — the prepared-write queue, the notification subscriptions and
-the outstanding-request rule all need state that outlives a request, so
-they are the caller's and this package does not pretend otherwise.
+## What the package contains
 
-`tests/embedded_probe.nv` is that claim in a form that either builds or
-does not, and **it builds**: `novo build --target=nrf52-qemu` produces
-a Cortex-M4 ELF from the probe, this package, l2cap-nv and
-hci-codec-nv.  The claim matters more here than anywhere else in the
-split — the device on a coin cell is the SERVER, so a GATT server that
-could not compile for one would have its whole audience on the other
-side of the link.
-
-The shard audit's `core-embedded` row reports **pass** on this package,
-and that pass is worth less than it looks.  The row assembles its
-scratch package with an empty `[dependencies]`, so l2cap-nv is not
-there — and this probe reaches it only as a type in a signature
-(`att.from_frame(frame: L2capFrame)`), which resolves to nothing
-quietly.  The same scratch build links with no copy of l2cap-nv on the
-machine at all.  l2cap-nv's own probe fails the same row, because it
-names a CONSTRUCTOR from its dependency rather than a type.
-
-Both halves are filed against the audit rather than designed around.
-The build that actually checks this package's device claim is the
-hand-linked one above, with every dependency present.
-
-## The load-bearing interface
-
-Two decisions.  The first is that the walks return a **PDU**, not a
-`Result`:
-
-```novo
-pub fn read(db: AttDatabase, handle: Int, mtu: Int) -> AttPdu
-pub fn read_by_group_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
-                          group_type: AttUuid, mtu: Int) -> AttPdu
-```
-
-A read of a handle that is not there is not an error in this package's
-sense — it is an **Error Response**, which the peer is owed and which
-the specification spells out to the byte.  A `Result` would make every
-caller turn a refusal into that PDU itself, which is writing the
-protocol a second time and getting the request-opcode field wrong once.
-
-The second is that the list-shaped responses carry `data` with a record
-width beside it rather than a list of structs:
-
-```novo
-    ReadByTypeResponse(pair_length: Int, data: [u8])
-    ReadByGroupTypeResponse(triplet_length: Int, data: [u8])
-```
-
-That is the wire format, and it is also the only shape that lets a
-server fill a buffer to the MTU and stop.  A list of structs has to be
-built whole and then measured, and on a device the whole is what does
-not fit.
-
-And the third thing worth saying is what is NOT one type:
-`AttDecodeError` is why a PDU could not be parsed here, `AttErrorCode`
-is what goes back to the peer.  A client that sends a two-byte Read
-Request has done both — sent something unparseable and earned an
-Invalid PDU response — and one enum for both would lose either the
-length that was wrong or put a parse detail on the air.
-
-## Where the no-allocation shape ran out
-
-A UUID is two bytes or sixteen, and the wire distinguishes them
-everywhere, so `AttUuid` is an enum with a payload.  **At
-`@tier(embedded)` a payload-carrying variant is a heap cell and cannot
-be constructed**, so a device cannot write `AttUuid16(0x2800)` down at
-all: it can receive one, match on one and pass one along, and it cannot
-make one.  The probe takes the type it discovers from an argument for
-that reason.
-
-Nothing here is designed around it.  The alternative — a fixed-width
-`@value` struct holding a `[u8; 16]` and a width flag — is worse for a
-different reason: a `@value` struct may not be the payload of a
-`Result`, an optional, an enum or a boxed struct (E2015), so it could
-not be a field of `AttAttribute` and could not be returned by a
-decode that can fail.  Both are open toolchain defects, filed from this
-lane; the signatures stay as they are, because a package that changed
-its types to fit a compiler limitation would be publishing the
-limitation as a design.
-
-## What is not here, and what a consumer should expect
-
-**A server loop.**  Dispatch, the prepared-write queue behind Prepare
-Write and Execute Write, notification subscriptions, and the one-
-request-at-a-time rule.  Each needs state that outlives a request, and
-`is_request` is the predicate a caller enforces the last of those with.
-
-**The Read Multiple Variable pair** (0x20 / 0x21) and **Multiple Handle
-Value Notification** (0x23), which are Bluetooth 5.2's.
-`AttHandleValue` is declared for them and nothing decodes into it yet.
-
-**Signature verification** for Signed Write Command: the PDU carries
-its twelve signature bytes, and checking them is a CSRK operation that
-belongs beside smp-nv's toolbox rather than in a parser.
-
-## The reference implementation
-
-`orbit/ble`'s ATT layer, spread across four modules that this package
-makes two: `host/att.nv` (867 lines — the opcode constants, the error
-codes, and a builder and a reader per PDU field),
-`host/att_server.nv` (1,294 — the walks over a heap database blob),
-`host/att_server_scratch.nv` (1,014 — the same walks again, written
-against fixed RAM) and `host/gatt_db.nv` (549 — one profile, written as
-constants).
-
-Three things change in the port, and each is a thing the reference could
-not have.  The forty-odd `read_*_req_*` and `build_*_rsp` functions
-become `decode` and `encode` over one `AttPdu`, so a field cannot be
-read off the wrong PDU.  The `ATT_ERR_*` integers become
-`AttErrorCode`, so an error code cannot be compared against an opcode.
-And the database stops being a blob at a fixed address: every
-`*_to_scratch*` function in `att_server_scratch.nv` carries a `[hw]`
-row for no reason except that it writes to 0x2000F700, and the same
-arithmetic over a caller-held value carries none.
-
-The Bluetooth Core Specification Vol 3 Parts F and G are the source of
-the test vectors.
-
-## Status
-
-| item | implemented |
+| Module | Contents |
 | --- | --- |
-| `att.CID`, `.MTU_DEFAULT`, `.MTU_MINIMUM`; every `gatt.UUID_*` | yes — they are constants |
+| `att` | The protocol. Every ATT PDU in both directions as one type, encoding and decoding, the opcode arithmetic, the MTU rule, the attribute table and the permissions, and the walk that answers each discovery and access request. |
+| `gatt` | The declarations ATT reads. The assigned type numbers, the characteristic properties, services, characteristics and descriptors as values, the bytes each way, and the functions that turn a profile into the rows a table holds. |
+
+## How to choose an entry point
+
+**`encode` and `decode` are the codec.** They turn a PDU into the bytes
+of an L2CAP payload and back. Use them in a capture tool, in a test, and
+anywhere the channel is already handled.
+
+**`frame` and `from_frame` are the same thing with the channel
+attached.** They speak l2cap-nv's `L2capFrame`, so a frame that arrived
+on the wrong channel is refused here rather than parsed as an opcode.
+Use them in a stack built on l2cap-nv.
+
+**The walks are the server.** `find_information`, `find_by_type_value`,
+`read_by_type`, `read_by_group_type`, `read`, `read_blob`,
+`read_multiple` and `write` each take a request's fields and the MTU and
+return the PDU that answers it. Use them when you are the server. A
+client uses `encode` to ask and `decode` to read the answer.
+
+**`gatt` is for whoever writes the profile.** `service_attribute`,
+`characteristic_attribute`, `characteristic_value_attribute` and
+`descriptor_attribute` turn services and characteristics into the rows
+`att.database` takes, so a profile is written once rather than written
+and then laid out by hand.
+
+## The rules a user needs
+
+1. **Both handles in a range request are inclusive.** A request for
+   0x0001 to 0x0005 covers five attributes, and getting the ends wrong
+   is the classic ATT server bug. `attributes_in_range` is that rule on
+   its own (Core Vol 3 Part F section 3.4.3.1).
+2. **A walk answers with a PDU, never a `Result`.** A read of a handle
+   that is not there is an Error Response, which the peer is owed and
+   which the specification spells out to the byte. Send what you are
+   given.
+3. **`AttDecodeError` and `AttErrorCode` are different answers.** The
+   first is why this package could not parse what arrived. The second is
+   what goes back on the air. A three-byte Read Request produces both.
+4. **The MTU is the smaller of the two offers.** `negotiated_mtu` takes
+   the client's and the server's numbers from the Exchange MTU pair. A
+   peer that asks for less than 23 gets 23, because a smaller link
+   cannot carry a read response (section 3.4.2).
+5. **Every pair in a Read By Type response is the same length.** The
+   walk stops at the first attribute whose value length differs from the
+   first one's. A server that checked only the MTU sends a response no
+   client can split (section 3.4.4.1).
+6. **A Find Information response is in one format throughout.** A table
+   that mixes 16-bit and 128-bit types stops at the first change of
+   width (section 3.4.3.2).
+7. **Only a grouping type is legal in Read By Group Type.** That is
+   0x2800 and 0x2801. Anything else is answered with
+   `AttUnsupportedGroupType` (section 3.4.4.9).
+8. **A Read Blob offset past the end is `AttInvalidOffset`.** An offset
+   exactly at the end is an empty Read Blob Response, which is how a
+   client learns it has the whole value (section 3.4.4.5).
+9. **A Read Multiple response carries no lengths.** A client that does
+   not already know each value's length cannot split the answer. That is
+   the specification's design and this package reproduces it (section
+   3.4.4.7).
+10. **Compare UUIDs with `uuid_eq`, never byte for byte.** A 16-bit UUID
+    and the 128-bit expansion of the same assigned number are the same
+    type, and a client is allowed to spell its filter out in full.
+11. **The security state is yours to supply.** This package cannot know
+    whether a link is encrypted or a peer authenticated, so
+    `permission_error` and `write` take those facts as arguments along
+    with the encryption key size (section 3.2.5).
+12. **A write of a different length is refused.** `write` answers
+    `AttInvalidAttributeValueLength` rather than changing an attribute's
+    width, because a fixed-width characteristic that silently changed
+    size is how a client's next read stops parsing.
+13. **One request at a time per link.** A client that sends a second
+    request before the first is answered has broken the protocol. The
+    rule needs state that outlives a request, so it is yours to enforce;
+    `is_request` is the predicate it is written against (section 3.3.2).
+14. **A reserved bit in a Client Characteristic Configuration write is
+    reported, not masked.** `read_client_configuration` refuses it, and
+    the caller answers the peer `AttValueNotAllowed` (Core Vol 3 Part G
+    section 3.3.3.3).
+
+## Running on a microcontroller
+
+novo-lang lets a package state which of its modules can run on a device
+with no heap allocator, and the compiler checks that claim on every
+build. Here the claim covers both modules, and it matters more here than
+anywhere else in this family: the device on a coin cell is usually the
+server.
+
+```bash
+novo build --target=nrf52-qemu src/main.nv
+```
+
+`tests/embedded_probe.nv` is that claim as a program that either builds
+or does not. It builds, producing a Cortex-M4 executable from the probe,
+this package, l2cap-nv and hci-codec-nv.
+
+A device cannot write a UUID down. `AttUuid` has two variants because
+the wire distinguishes the two widths everywhere, and at the embedded
+tier a payload-carrying variant is a heap cell, so `AttUuid16(0x2800)`
+cannot be constructed there. A device can receive a UUID, match on one
+and pass one along, which is what a server does with the type in a
+request. The probe takes the type it searches for from an argument for
+that reason. This is an open toolchain defect rather than a property of
+the protocol, and the signatures are published unchanged.
+
+The same tier rules mean a probe cannot write its own table down: a list
+literal and a boxed struct literal are both allocations. On a device it
+does not have to. The rows arrive from flash and the requests arrive
+from the connection.
+
+## What is not included
+
+- **A server loop.** Dispatch, the prepared-write queue behind Prepare
+  Write and Execute Write, notification subscriptions, and the
+  one-request-at-a-time rule. Each needs state that outlives a request,
+  and a package that held it would be holding a connection.
+- **The Read Multiple Variable pair, 0x20 and 0x21, and Multiple Handle
+  Value Notification, 0x23.** All three are Bluetooth 5.2's.
+  `AttHandleValue` is declared for them and nothing decodes into it yet.
+- **Signature verification.** A Signed Write Command carries its twelve
+  signature bytes and this package hands them over. Checking them is a
+  connection-signature-resolving-key operation that belongs beside
+  smp-nv's cryptographic toolbox rather than in a parser.
+- **The permissions policy.** GATT says what a characteristic may be
+  used for and says nothing about what security it needs.
+  `AttPermissions` is a value the caller fills in, and a package that
+  guessed would be inventing a policy.
+- **A channel and a radio.** PDUs arrive as bytes and leave as bytes.
+  Getting them to and from the peer is l2cap-nv's work and the
+  controller's.
+
+## Related packages
+
+- [l2cap-nv](https://novo-lang.org/packages/l2cap-nv) is the layer
+  below. It provides the channel ATT runs on, and this package depends
+  on it so that `frame` and `from_frame` speak its `L2capFrame` rather
+  than a second spelling of a channel and a payload.
+- [smp-nv](https://novo-lang.org/packages/smp-nv) is the Security
+  Manager, on CID 0x0006. It is what makes a link encrypted and
+  authenticated, which is the state `permission_error` is told about.
+  Pair with smp-nv, then read with this package.
+- [hci-codec-nv](https://novo-lang.org/packages/hci-codec-nv) is two
+  layers below, the interface to a controller.
+- [ble-link-codec-nv](https://novo-lang.org/packages/ble-link-codec-nv)
+  is the link layer, for a program that drives a radio itself.
+- The standard library has no Bluetooth module. `std.net` is sockets and
+  has nothing to do with attributes.
+
+## Tests
+
+```bash
+novo test tests/att_tests.nv      # 32 tests against the signatures
+novo test tests/gatt_tests.nv     # 12 tests over the declarations
+```
+
+The byte strings the suite asserts against are the Bluetooth Core
+Specification's own, Volume 3 Part F section 3.4: the Exchange MTU pair,
+the Error Response layout, and the Read By Group Type response that
+reports one primary service over handles 0x0001 to 0x0005. The database
+they walk is a five-row Device Information service, which is the
+smallest table that exercises every walk: a grouping attribute with an
+end-group handle, two characteristic declarations, and two values of
+different lengths. The GATT suite checks the declarations of Volume 3
+Part G section 3 against the bytes a response carries.
+
+The tests compile today and fail at run, each on the `not implemented`
+panic that is its body. That is the expected state of an interface
+release. They turn green one at a time as bodies land.
+
+## Implementation status
+
+| Item | Implemented |
+| --- | --- |
+| `att.CID`, `.MTU_DEFAULT`, `.MTU_MINIMUM`; every `gatt.UUID_*` | yes (they are constants) |
 | `att.negotiated_mtu` | no |
 | `att.encode_uuid`, `.decode_uuid`, `.uuid_eq` | no |
 | `att.error_code_value`, `.error_code_of` | no |
@@ -198,3 +326,9 @@ the test vectors.
 | `gatt.service_declaration_value`, `.characteristic_declaration_value`, `.client_configuration_value` | no |
 | `gatt.read_characteristic_declaration`, `.read_service_declaration`, `.read_client_configuration` | no |
 | `gatt.service_attribute`, `.characteristic_attribute`, `.characteristic_value_attribute`, `.descriptor_attribute` | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->
