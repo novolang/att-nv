@@ -1,8 +1,5 @@
 // gatt — the declarations ATT reads, Core Vol 3 Part G.
 //
-// Every body is a `todo()`.  The signatures are the design; see the
-// README for the stamp.
-//
 // GATT is not a second protocol.  It is a set of RULES about what the
 // values in an attribute database mean: an attribute of type 0x2800
 // declares a service, one of type 0x2803 declares a characteristic and
@@ -16,6 +13,8 @@
 // subscriptions and its prepared-write queue are the CALLER's: they
 // need state that outlives a request, and a `core` package that held
 // them would be holding a connection.
+
+use att
 
 // ── Assigned attribute types (Vol 3 Part G § 3) ─────────────────────
 
@@ -64,11 +63,45 @@ pub struct GattProperties
 
 // The properties byte on the wire.
 pub fn properties_byte(properties: GattProperties) -> Int
-    todo("gatt.properties_byte")
+    // The byte is the eight flags in the specification's own bit
+    // order: 0x01 is broadcast, 0x80 is extended and the rest are
+    // between them (§ 3.3.1.1).
+    (if properties.broadcast then 0x01 else 0x00)
+        | (if properties.read then 0x02 else 0x00)
+        | (if properties.write_without_response then 0x04 else 0x00)
+        | (if properties.write then 0x08 else 0x00)
+        | (if properties.notify then 0x10 else 0x00)
+        | (if properties.indicate then 0x20 else 0x00)
+        | (if properties.authenticated_signed_writes then 0x40 else 0x00)
+        | (if properties.extended then 0x80 else 0x00)
 
 // The properties a byte names.
 pub fn properties_of(byte: Int) -> GattProperties
-    todo("gatt.properties_of")
+    system
+        return GattProperties {
+            broadcast: (byte & 0x01) != 0,
+            read: (byte & 0x02) != 0,
+            write_without_response: (byte & 0x04) != 0,
+            write: (byte & 0x08) != 0,
+            notify: (byte & 0x10) != 0,
+            indicate: (byte & 0x20) != 0,
+            authenticated_signed_writes: (byte & 0x40) != 0,
+            extended: (byte & 0x80) != 0 }
+
+// The little-endian 16-bit word at an offset.  att's own reader is
+// private to its module, and the two bytes of a value handle are what
+// this module reads out of a declaration.
+fn word_at(bytes: [u8], at: Int) -> Int
+    bytes[at] as Int | (bytes[at + 1] as Int << 8)
+
+// A copy of a value's bytes from an offset on: every declaration puts
+// its UUID field last, so the field's extent is the rest of the value.
+fn bytes_from(value: [u8], from: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(list.len(value) - from)
+        for i in from..list.len(value)
+            let _ = list.try_push(out, value[i])
+        return out
 
 // ── Declarations ────────────────────────────────────────────────────
 
@@ -114,7 +147,7 @@ pub struct GattClientConfiguration
 // The value of a service declaration: the service's UUID and nothing
 // else.
 pub fn service_declaration_value(service: GattService) -> [u8]
-    todo("gatt.service_declaration_value")
+    att.encode_uuid(service.uuid)
 
 // The value of a characteristic declaration: the properties byte, the
 // two little-endian bytes of the value handle, then the UUID.
@@ -134,7 +167,17 @@ pub fn service_declaration_value(service: GattService) -> [u8]
 //     println("${list.len(v)} bytes")   // 5: properties, handle, uuid
 // ```
 pub fn characteristic_declaration_value(characteristic: GattCharacteristic) -> [u8]
-    todo("gatt.characteristic_declaration_value")
+    let uuid = att.encode_uuid(characteristic.uuid)
+    system
+        // The two little-endian bytes of the value handle, which is the
+        // handle a client reads the characteristic's value at.
+        var out: [u8] = list.with_capacity(3 + list.len(uuid))
+        let _ = list.try_push(out, properties_byte(characteristic.properties) as u8)
+        let _ = list.try_push(out, (characteristic.value_handle & 0xFF) as u8)
+        let _ = list.try_push(out, ((characteristic.value_handle >> 8) & 0xFF) as u8)
+        for b in uuid
+            let _ = list.try_push(out, b)
+        return out
 
 // Read a characteristic declaration a Read By Type response carried.
 //
@@ -143,16 +186,47 @@ pub fn characteristic_declaration_value(characteristic: GattCharacteristic) -> [
 // rather than something this could recover.
 pub fn read_characteristic_declaration(declaration_handle: Int,
                                        value: [u8]) -> Result<GattCharacteristic, AttDecodeError>
-    todo("gatt.read_characteristic_declaration")
+    let n = list.len(value)
+    if n < 5
+        system
+            return Err(AttPduTooShort(have: n, need: 5))
+    system
+        // Three bytes of properties and value handle, then the UUID.
+        // The width refusal is att.decode_uuid's to make, and it is the
+        // one thing this call can fail on.
+        let answer: Result<GattCharacteristic, AttDecodeError> = match att.decode_uuid(bytes_from(value, 3))
+            Ok(uuid) =>
+                Ok(GattCharacteristic {
+                    declaration_handle: declaration_handle,
+                    value_handle: word_at(value, 1),
+                    properties: properties_of(value[0] as Int),
+                    uuid: uuid })
+            Err(e)   => Err(e)
+        return answer
 
 // Read a service declaration a Read By Group Type response carried.
 pub fn read_service_declaration(declaration_handle: Int, end_group_handle: Int, primary: Bool,
                                 value: [u8]) -> Result<GattService, AttDecodeError>
-    todo("gatt.read_service_declaration")
+    system
+        let answer: Result<GattService, AttDecodeError> = match att.decode_uuid(value)
+            Ok(uuid) =>
+                Ok(GattService {
+                    declaration_handle: declaration_handle,
+                    end_group_handle: end_group_handle,
+                    uuid: uuid,
+                    primary: primary })
+            Err(e)   => Err(e)
+        return answer
 
 // The two little-endian bytes of a client configuration.
 pub fn client_configuration_value(configuration: GattClientConfiguration) -> [u8]
-    todo("gatt.client_configuration_value")
+    let flags = (if configuration.notify then 0x01 else 0x00)
+        | (if configuration.indicate then 0x02 else 0x00)
+    system
+        var out: [u8] = list.with_capacity(2)
+        let _ = list.try_push(out, (flags & 0xFF) as u8)
+        let _ = list.try_push(out, ((flags >> 8) & 0xFF) as u8)
+        return out
 
 // Read a client configuration a client wrote.
 //
@@ -161,9 +235,41 @@ pub fn client_configuration_value(configuration: GattClientConfiguration) -> [u8
 // answer to send, so this reports it as a decode failure rather than
 // masking the bits away.
 pub fn read_client_configuration(value: [u8]) -> Result<GattClientConfiguration, AttDecodeError>
-    todo("gatt.read_client_configuration")
+    let n = list.len(value)
+    if n < 2
+        system
+            return Err(AttPduTooShort(have: n, need: 2))
+    system
+        if n != 2
+            return Err(AttRaggedList(unit: 2, actual: n))
+        let flags = word_at(value, 0)
+        // Bits above the two defined ones are reserved, and a write
+        // that sets one is AttValueNotAllowed on the air: the caller
+        // answers the peer, so this refuses rather than masking the
+        // bits away.  Unit 0 is the width this refusal carries when no
+        // width in the value fits it.
+        if (flags & 0xFFFC) != 0
+            return Err(AttRaggedList(unit: 0, actual: flags))
+        return Ok(GattClientConfiguration {
+            notify: (flags & 0x01) != 0,
+            indicate: (flags & 0x02) != 0 })
 
 // ── Declarations as attributes ──────────────────────────────────────
+
+// The permissions a declaration row carries.  A client reads a
+// declaration to discover the profile and writes none of them, and
+// GATT attaches no security requirement to the discovery itself.  The
+// permissions that ARE a policy are the ones a caller passes for a
+// value or a descriptor.
+fn declaration_permissions() -> AttPermissions
+    system
+        return AttPermissions {
+            readable: true,
+            writable: false,
+            encryption_required: false,
+            authentication_required: false,
+            authorization_required: false,
+            minimum_key_size: 0 }
 
 // A service's declaration as the row an `AttDatabase` holds.
 //
@@ -172,12 +278,28 @@ pub fn read_client_configuration(value: [u8]) -> Result<GattClientConfiguration,
 // writes the profile once rather than writing it and then writing its
 // handle layout.
 pub fn service_attribute(service: GattService) -> AttAttribute
-    todo("gatt.service_attribute")
+    let type_number = if service.primary
+        UUID_PRIMARY_SERVICE
+    else
+        UUID_SECONDARY_SERVICE
+    system
+        return AttAttribute {
+            handle: service.declaration_handle,
+            attribute_type: AttUuid16(type_number),
+            value: service_declaration_value(service),
+            end_group_handle: service.end_group_handle,
+            permissions: declaration_permissions() }
 
 // A characteristic's DECLARATION as a row.  The value attribute is the
 // next one, and `characteristic_value_attribute` is it.
 pub fn characteristic_attribute(characteristic: GattCharacteristic) -> AttAttribute
-    todo("gatt.characteristic_attribute")
+    system
+        return AttAttribute {
+            handle: characteristic.declaration_handle,
+            attribute_type: AttUuid16(UUID_CHARACTERISTIC),
+            value: characteristic_declaration_value(characteristic),
+            end_group_handle: characteristic.declaration_handle,
+            permissions: declaration_permissions() }
 
 // A characteristic's VALUE as a row, at `value_handle`.
 //
@@ -186,9 +308,21 @@ pub fn characteristic_attribute(characteristic: GattCharacteristic) -> AttAttrib
 // package that guessed would be inventing a policy.
 pub fn characteristic_value_attribute(characteristic: GattCharacteristic, value: [u8],
                                       permissions: AttPermissions) -> AttAttribute
-    todo("gatt.characteristic_value_attribute")
+    system
+        return AttAttribute {
+            handle: characteristic.value_handle,
+            attribute_type: characteristic.uuid,
+            value: value,
+            end_group_handle: characteristic.value_handle,
+            permissions: permissions }
 
 // A descriptor as a row.
 pub fn descriptor_attribute(descriptor: GattDescriptor, value: [u8],
                             permissions: AttPermissions) -> AttAttribute
-    todo("gatt.descriptor_attribute")
+    system
+        return AttAttribute {
+            handle: descriptor.handle,
+            attribute_type: descriptor.uuid,
+            value: value,
+            end_group_handle: descriptor.handle,
+            permissions: permissions }

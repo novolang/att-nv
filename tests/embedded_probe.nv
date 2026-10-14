@@ -11,20 +11,18 @@
 // a GATT server that could not compile for one would have its whole
 // audience on the other side of the link.
 //
-// It BUILDS; it does not run.  Every function it calls is a `todo()`
-// today, so a device that executed this would panic on the first line
-// of `main`.  What is being checked is the TIER: `--target=nrf52-qemu`
-// stamps `@tier(embedded)` on every function it compiles, so the
-// checker walks the module and refuses a `Str` concatenation, a `Bytes`
-// call or an unbounded `while` wherever the implementation later puts
-// one.
+// It BUILDS; it does not run.  What is being checked is the TIER:
+// `--target=nrf52-qemu` stamps `@tier(embedded)` on every function it
+// compiles, so the checker walks the module and refuses a `Str`
+// concatenation, a `Bytes` call or an unbounded `while` wherever the
+// implementation later puts one.
 //
 // WHERE THE VALUES COME FROM.  At `@tier(embedded)` a list literal is
 // an implicit heap allocation and a boxed struct literal is a heap
 // cell, so a probe cannot write its own database down — the values have
 // to ARRIVE, which on a device they do, from flash and from the
 // connection.  `stored_database` and `received` stand where that
-// arrival is; their bodies are `todo()` like everything else here.
+// arrival is; their bodies are `todo()`.
 //
 // `L2capFrame` comes from l2cap-nv through this package's dependency; a
 // type's identity is its name across the assembly, so naming the

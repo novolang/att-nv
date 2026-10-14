@@ -1,10 +1,6 @@
 // att — the Bluetooth Attribute Protocol, with no radio and no server
 // loop around it.
 //
-// Every body is a `todo()`.  The signatures and the effect rows are the
-// design, and the compiler checks them as claims; see the README for
-// the stamp.
-//
 // Core Vol 3 Part F.  ATT is twenty-odd request/response pairs over one
 // L2CAP channel, plus the two server-initiated PDUs — a notification,
 // which is unacknowledged, and an indication, which is not.  Everything
@@ -14,11 +10,12 @@
 // All multi-byte fields are little-endian, which is the Bluetooth
 // convention throughout.  Handles are 16 bits and 0x0000 is reserved.
 //
-// `L2capFrame` is l2cap-nv's, named by `frame` and `from_frame`.  There
-// is no `use l2cap` line because a type's identity is its NAME across
-// the whole assembly: the dependency in novo.toml brings the
-// declaration in, and a `use` would only be needed to reach that
-// package's functions, which this one does not call.
+// `L2capFrame` is l2cap-nv's, named by `frame` and `from_frame`.  The
+// `use l2cap` line below is what puts the name in scope in a device
+// build; a host build of this module alone finds it through the
+// dependency in novo.toml.
+
+use l2cap
 
 // ── The channel and the MTU (§ 3.2.8, § 3.4.2) ──────────────────────
 
@@ -43,7 +40,17 @@ pub const MTU_MINIMUM = 23
 // less than the minimum — a peer that asks for twelve gets the floor
 // rather than a link that cannot carry a read response.
 pub fn negotiated_mtu(client_rx_mtu: Int, server_rx_mtu: Int) -> Int
-    todo("att.negotiated_mtu")
+    // A request below the floor is a protocol violation rather than a
+    // negotiation, so each offer is raised to it before the two are
+    // compared (§ 3.4.2).
+    var answer = client_rx_mtu
+    if answer < MTU_MINIMUM
+        answer = MTU_MINIMUM
+    if server_rx_mtu < answer
+        answer = server_rx_mtu
+    if answer < MTU_MINIMUM
+        answer = MTU_MINIMUM
+    answer
 
 // ── UUIDs ───────────────────────────────────────────────────────────
 
@@ -66,16 +73,92 @@ pub enum AttInfoFormat
     AttUuid16Format
     AttUuid128Format
 
+// The two little-endian bytes of a 16-bit UUID, which is how the
+// short form sits on the wire everywhere.
+fn short_uuid_bytes(value: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(2)
+        let _ = list.try_push(out, (value & 0xFF) as u8)
+        let _ = list.try_push(out, ((value >> 8) & 0xFF) as u8)
+        return out
+
 // The UUID as its wire bytes: two little-endian bytes, or sixteen.
 pub fn encode_uuid(uuid: AttUuid) -> [u8]
-    todo("att.encode_uuid")
+    match uuid
+        AttUuid16(value)  => short_uuid_bytes(value)
+        AttUuid128(bytes) => copy_range(bytes, 0, list.len(bytes))
+
+// The little-endian 16-bit word at an offset, which is every handle,
+// offset and short UUID on the wire.  The caller has established that
+// both bytes are there.
+fn word_at(bytes: [u8], at: Int) -> Int
+    bytes[at] as Int | (bytes[at + 1] as Int << 8)
+
+// A copy of a byte range.  The copy is the point: a value that goes
+// into a table or a response outlives the buffer the request arrived
+// in, so nothing here hands a caller back its own bytes.
+fn copy_range(bytes: [u8], from: Int, to: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(to - from)
+        for i in from..to
+            let _ = list.try_push(out, bytes[i])
+        return out
+
+// An empty byte run, for the arms of a codec that have no data to add
+// to a shared shape.
+fn empty_bytes() -> [u8]
+    system
+        return list.with_capacity(0)
 
 // Read a UUID from its wire bytes.
 //
 // The width is the buffer's length: two bytes are a 16-bit UUID and
 // sixteen are a full one.  Any other length is `AttBadUuidLength`.
 pub fn decode_uuid(bytes: [u8]) -> Result<AttUuid, AttDecodeError>
-    todo("att.decode_uuid")
+    let n = list.len(bytes)
+    system
+        if n == 2
+            return Ok(AttUuid16(word_at(bytes, 0)))
+        if n == 16
+            return Ok(AttUuid128(copy_range(bytes, 0, 16)))
+        return Err(AttBadUuidLength(n))
+
+// The wire width of a UUID, which is what tells the two variants apart
+// wherever a response has to say which format it is in.
+fn uuid_wire_len(uuid: AttUuid) -> Int
+    match uuid
+        AttUuid16(_)  => 2
+        AttUuid128(_) => 16
+
+// The twelve bytes every Bluetooth 128-bit UUID shares, which is what
+// makes a short UUID an expansion of the same assigned number rather
+// than a different type (§ 3.2.2).  They are checked as the six
+// little-endian words they are, which is also how they arrive.
+fn has_base_uuid(wide: [u8]) -> Bool
+    list.len(wide) == 16
+        and word_at(wide, 0) == 0x34FB
+        and word_at(wide, 2) == 0x5F9B
+        and word_at(wide, 4) == 0x0080
+        and word_at(wide, 6) == 0x8000
+        and word_at(wide, 8) == 0x1000
+        and word_at(wide, 10) == 0x0000
+
+// Whether a 16-bit assigned number and a 128-bit UUID are the same
+// type: the base UUID with the number in the two bytes that carry it.
+fn short_matches(short: Int, wide: [u8]) -> Bool
+    has_base_uuid(wide)
+        and (wide[12] as Int) == (short & 0xFF)
+        and (wide[13] as Int) == ((short >> 8) & 0xFF)
+
+// Whether two byte runs are the same bytes, which is the value half of
+// a Find By Type Value match and the long form of a UUID comparison.
+fn bytes_equal(a: [u8], b: [u8]) -> Bool
+    if list.len(a) != list.len(b)
+        return false
+    for i in 0..list.len(a)
+        if a[i] != b[i]
+            return false
+    true
 
 // Whether two UUIDs name the same type.
 //
@@ -84,7 +167,15 @@ pub fn decode_uuid(bytes: [u8]) -> Result<AttUuid, AttDecodeError>
 // before the comparison, which is the rule a server that compared bytes
 // would get wrong for a client that spelled its filter out in full.
 pub fn uuid_eq(a: AttUuid, b: AttUuid) -> Bool
-    todo("att.uuid_eq")
+    match a
+        AttUuid16(short) =>
+            match b
+                AttUuid16(other) => short == other
+                AttUuid128(wide) => short_matches(short, wide)
+        AttUuid128(wide) =>
+            match b
+                AttUuid16(short)  => short_matches(short, wide)
+                AttUuid128(other) => bytes_equal(wide, other)
 
 // ── Error codes (§ 3.4.1.1, Table 3.4) ──────────────────────────────
 
@@ -118,9 +209,39 @@ pub enum AttErrorCode
     AttCommonProfileError(code: Int)
     AttReservedError(code: Int)
 
+// The three error bytes whose value is also a character's: 0x09 is
+// Prepare Queue Full, which a linter reading the literal alone cannot
+// tell from a tab.  Naming them keeps both tables below in the
+// specification's spelling.
+const CODE_PREPARE_QUEUE_FULL = 0x09
+const CODE_ATTRIBUTE_NOT_FOUND = 0x0A
+const CODE_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
+
 // The byte an error code is on the wire.
 pub fn error_code_value(code: AttErrorCode) -> Int
-    todo("att.error_code_value")
+    match code
+        AttInvalidHandle                 => 0x01
+        AttReadNotPermitted              => 0x02
+        AttWriteNotPermitted             => 0x03
+        AttInvalidPdu                    => 0x04
+        AttInsufficientAuthentication    => 0x05
+        AttRequestNotSupported           => 0x06
+        AttInvalidOffset                 => 0x07
+        AttInsufficientAuthorization     => 0x08
+        AttPrepareQueueFull              => CODE_PREPARE_QUEUE_FULL
+        AttAttributeNotFound             => CODE_ATTRIBUTE_NOT_FOUND
+        AttAttributeNotLong              => 0x0B
+        AttInsufficientEncryptionKeySize => 0x0C
+        AttInvalidAttributeValueLength   => CODE_INVALID_ATTRIBUTE_VALUE_LENGTH
+        AttUnlikelyError                 => 0x0E
+        AttInsufficientEncryption        => 0x0F
+        AttUnsupportedGroupType          => 0x10
+        AttInsufficientResources         => 0x11
+        AttDatabaseOutOfSync             => 0x12
+        AttValueNotAllowed               => 0x13
+        AttApplicationError(value)       => value
+        AttCommonProfileError(value)     => value
+        AttReservedError(value)          => value
 
 // The error code a byte names.
 //
@@ -128,7 +249,54 @@ pub fn error_code_value(code: AttErrorCode) -> Int
 // ranges, so a peer that invents a code is reported rather than
 // dropped.
 pub fn error_code_of(byte: Int) -> AttErrorCode
-    todo("att.error_code_of")
+    system
+        if byte == 0x01
+            return AttInvalidHandle
+        if byte == 0x02
+            return AttReadNotPermitted
+        if byte == 0x03
+            return AttWriteNotPermitted
+        if byte == 0x04
+            return AttInvalidPdu
+        if byte == 0x05
+            return AttInsufficientAuthentication
+        if byte == 0x06
+            return AttRequestNotSupported
+        if byte == 0x07
+            return AttInvalidOffset
+        if byte == 0x08
+            return AttInsufficientAuthorization
+        if byte == CODE_PREPARE_QUEUE_FULL
+            return AttPrepareQueueFull
+        if byte == CODE_ATTRIBUTE_NOT_FOUND
+            return AttAttributeNotFound
+        if byte == 0x0B
+            return AttAttributeNotLong
+        if byte == 0x0C
+            return AttInsufficientEncryptionKeySize
+        if byte == CODE_INVALID_ATTRIBUTE_VALUE_LENGTH
+            return AttInvalidAttributeValueLength
+        if byte == 0x0E
+            return AttUnlikelyError
+        if byte == 0x0F
+            return AttInsufficientEncryption
+        if byte == 0x10
+            return AttUnsupportedGroupType
+        if byte == 0x11
+            return AttInsufficientResources
+        if byte == 0x12
+            return AttDatabaseOutOfSync
+        if byte == 0x13
+            return AttValueNotAllowed
+        // The two ranges belong to somebody else: 0x80..0x9F is a
+        // profile's and 0xE0..0xFF the Core Supplement's.  Everything
+        // between them is reserved, and a peer that invents a byte
+        // there is reported rather than dropped.
+        if byte >= 0x80 and byte <= 0x9F
+            return AttApplicationError(code: byte)
+        if byte >= 0xE0
+            return AttCommonProfileError(code: byte)
+        return AttReservedError(code: byte)
 
 // ── Reading a PDU ───────────────────────────────────────────────────
 
@@ -164,7 +332,21 @@ pub enum AttDecodeError
 // error type only if it implements `Error`.
 impl Error for AttDecodeError
     fn message(self) -> Str
-        todo("att.AttDecodeError.message")
+        system
+            let text: Str = match self
+                AttPduTooShort(have, need)  =>
+                    "att: ${have} bytes is shorter than the ${need} this opcode needs"
+                AttUnknownOpcode(opcode)    =>
+                    "att: ${opcode} is not an opcode this release knows"
+                AttRaggedList(unit, actual) =>
+                    "att: a record width of ${unit} does not divide ${actual}"
+                AttBadUuidLength(length)    =>
+                    "att: a uuid field of ${length} bytes is neither two nor sixteen"
+                AttWrongChannel(cid)        =>
+                    "att: a frame on channel ${cid} is not the attribute channel"
+                AttOverMtu(length, mtu)     =>
+                    "att: ${length} bytes is more than the ${mtu}-byte mtu allows"
+            return text
 
 // ── The PDUs (§ 3.4) ────────────────────────────────────────────────
 
@@ -224,20 +406,464 @@ pub enum AttPdu
     HandleValueIndication(handle: Int, value: [u8])
     HandleValueConfirmation
 
+// A PDU that is nothing but its opcode: three of the twenty-eight are
+// an answer with no parameters at all.
+fn op_pdu(op: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(1)
+        let _ = list.try_push(out, op as u8)
+        return out
+
+// The opcode and one little-endian word, which is all an MTU, a handle
+// or an offset ever is.
+fn word_pdu(op: Int, word: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(3)
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, (word & 0xFF) as u8)
+        let _ = list.try_push(out, ((word >> 8) & 0xFF) as u8)
+        return out
+
+// The opcode and two little-endian words: a range, or a handle and an
+// offset.
+fn two_word_pdu(op: Int, first: Int, second: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(5)
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, (first & 0xFF) as u8)
+        let _ = list.try_push(out, ((first >> 8) & 0xFF) as u8)
+        let _ = list.try_push(out, (second & 0xFF) as u8)
+        let _ = list.try_push(out, ((second >> 8) & 0xFF) as u8)
+        return out
+
+// A PDU whose body is a byte run and nothing else.
+fn bytes_pdu(op: Int, bytes: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(1 + list.len(bytes))
+        let _ = list.try_push(out, op as u8)
+        for b in bytes
+            let _ = list.try_push(out, b)
+        return out
+
+// A response whose byte after the opcode is the width of the records
+// that follow: a pair length or a triplet length.
+fn record_pdu(op: Int, unit: Int, data: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(2 + list.len(data))
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, unit as u8)
+        for b in data
+            let _ = list.try_push(out, b)
+        return out
+
+// The opcode, a handle, and the value or signature that follows it.
+fn word_bytes_pdu(op: Int, word: Int, bytes: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(3 + list.len(bytes))
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, (word & 0xFF) as u8)
+        let _ = list.try_push(out, ((word >> 8) & 0xFF) as u8)
+        for b in bytes
+            let _ = list.try_push(out, b)
+        return out
+
+// The opcode and two words, then a byte run: the prepared-write pair,
+// which carries the handle, the offset and the part.
+fn two_word_bytes_pdu(op: Int, first: Int, second: Int, bytes: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(5 + list.len(bytes))
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, (first & 0xFF) as u8)
+        let _ = list.try_push(out, ((first >> 8) & 0xFF) as u8)
+        let _ = list.try_push(out, (second & 0xFF) as u8)
+        let _ = list.try_push(out, ((second >> 8) & 0xFF) as u8)
+        for b in bytes
+            let _ = list.try_push(out, b)
+        return out
+
+// The opcode, a range, and a UUID in the width the value was given in:
+// the two requests that name the type they search for.
+fn uuid_pdu(op: Int, first: Int, second: Int, uuid: AttUuid) -> [u8]
+    system
+        let wire = encode_uuid(uuid)
+        var out: [u8] = list.with_capacity(5 + list.len(wire))
+        let _ = list.try_push(out, op as u8)
+        let _ = list.try_push(out, (first & 0xFF) as u8)
+        let _ = list.try_push(out, ((first >> 8) & 0xFF) as u8)
+        let _ = list.try_push(out, (second & 0xFF) as u8)
+        let _ = list.try_push(out, ((second >> 8) & 0xFF) as u8)
+        for b in wire
+            let _ = list.try_push(out, b)
+        return out
+
+// A list of handles as the request's parameters, two little-endian
+// bytes each and no count of them anywhere.
+fn handles_pdu(op: Int, handles: [Int]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(1 + 2 * list.len(handles))
+        let _ = list.try_push(out, op as u8)
+        for h in handles
+            let _ = list.try_push(out, (h & 0xFF) as u8)
+            let _ = list.try_push(out, ((h >> 8) & 0xFF) as u8)
+        return out
+
+// Two byte runs as one, for the signed write, whose signature follows
+// its value with nothing between them.
+fn joined(a: [u8], b: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(list.len(a) + list.len(b))
+        for x in a
+            let _ = list.try_push(out, x)
+        for x in b
+            let _ = list.try_push(out, x)
+        return out
+
+// The four opcodes whose value is also a character's, named for the
+// same reason as the error codes: 0x0A in a comparison reads as a
+// newline.  Each name is used wherever its opcode is, in `encode`,
+// `decode` and `opcode`, so the byte is spelled once.
+const OP_READ_BY_TYPE_RESPONSE = 0x09
+const OP_READ_REQUEST = 0x0A
+const OP_READ_BLOB_RESPONSE = 0x0D
+const OP_WRITE_COMMAND = 0x52
+
+// The two bytes an Execute Write Request's flag takes (§ 3.4.6.3),
+// named for the same reason: 0x00 in a comparison reads as a character
+// literal.
+const EXECUTE_WRITE_CANCEL = 0x00
+const EXECUTE_WRITE_PREPARE = 0x01
+
+// The byte an Execute Write Request's flag is on the wire.
+fn execute_flag_value(flag: AttExecuteFlag) -> Int
+    match flag
+        AttCancelPrepared => EXECUTE_WRITE_CANCEL
+        AttWritePrepared  => EXECUTE_WRITE_PREPARE
+
 // The PDU as its wire bytes: the opcode, then its parameters.
 pub fn encode(pdu: AttPdu) -> [u8]
-    todo("att.encode")
+    system
+        let wire: [u8] = match pdu
+            ErrorResponse(request_opcode, handle, code)                        =>
+                // Five bytes and no more: the request it refuses, the
+                // handle that request named, and why.
+                var answer: [u8] = list.with_capacity(5)
+                let _ = list.try_push(answer, 0x01)
+                let _ = list.try_push(answer, request_opcode as u8)
+                let _ = list.try_push(answer, (handle & 0xFF) as u8)
+                let _ = list.try_push(answer, ((handle >> 8) & 0xFF) as u8)
+                let _ = list.try_push(answer, error_code_value(code) as u8)
+                answer
+            ExchangeMtuRequest(client_rx_mtu)                                  => word_pdu(0x02, client_rx_mtu)
+            ExchangeMtuResponse(server_rx_mtu)                                 => word_pdu(0x03, server_rx_mtu)
+            FindInformationRequest(starting_handle, ending_handle)             =>
+                two_word_pdu(0x04, starting_handle, ending_handle)
+            FindInformationResponse(format, data)                              =>
+                record_pdu(0x05, info_format_byte(format), data)
+            FindByTypeValueRequest(starting_handle, ending_handle, attribute_type, attribute_value) =>
+                // The request that asks by both type and value, and the
+                // only one whose type is a bare 16-bit number: the
+                // specification gives it no room for sixteen bytes.
+                var found: [u8] = list.with_capacity(7 + list.len(attribute_value))
+                let _ = list.try_push(found, 0x06)
+                let _ = list.try_push(found, (starting_handle & 0xFF) as u8)
+                let _ = list.try_push(found, ((starting_handle >> 8) & 0xFF) as u8)
+                let _ = list.try_push(found, (ending_handle & 0xFF) as u8)
+                let _ = list.try_push(found, ((ending_handle >> 8) & 0xFF) as u8)
+                let _ = list.try_push(found, (attribute_type & 0xFF) as u8)
+                let _ = list.try_push(found, ((attribute_type >> 8) & 0xFF) as u8)
+                for b in attribute_value
+                    let _ = list.try_push(found, b)
+                found
+            FindByTypeValueResponse(data)                                      => bytes_pdu(0x07, data)
+            ReadByTypeRequest(starting_handle, ending_handle, attribute_type)  =>
+                uuid_pdu(0x08, starting_handle, ending_handle, attribute_type)
+            ReadByTypeResponse(pair_length, data)                              =>
+                record_pdu(OP_READ_BY_TYPE_RESPONSE, pair_length, data)
+            ReadRequest(handle)                                                => word_pdu(OP_READ_REQUEST, handle)
+            ReadResponse(value)                                                => bytes_pdu(0x0B, value)
+            ReadBlobRequest(handle, offset)                                    => two_word_pdu(0x0C, handle, offset)
+            ReadBlobResponse(part)                                             => bytes_pdu(OP_READ_BLOB_RESPONSE, part)
+            ReadMultipleRequest(handles)                                       => handles_pdu(0x0E, handles)
+            ReadMultipleResponse(values)                                       => bytes_pdu(0x0F, values)
+            ReadByGroupTypeRequest(starting_handle, ending_handle, group_type) =>
+                uuid_pdu(0x10, starting_handle, ending_handle, group_type)
+            ReadByGroupTypeResponse(triplet_length, data)                      =>
+                record_pdu(0x11, triplet_length, data)
+            WriteRequest(handle, value)                                        => word_bytes_pdu(0x12, handle, value)
+            WriteResponse                                                      => op_pdu(0x13)
+            WriteCommand(handle, value)                                        => word_bytes_pdu(OP_WRITE_COMMAND, handle, value)
+            SignedWriteCommand(handle, value, signature)                       =>
+                word_bytes_pdu(0xD2, handle, joined(value, signature))
+            PrepareWriteRequest(handle, offset, part)                          =>
+                two_word_bytes_pdu(0x16, handle, offset, part)
+            PrepareWriteResponse(handle, offset, part)                         =>
+                two_word_bytes_pdu(0x17, handle, offset, part)
+            ExecuteWriteRequest(flag)                                          => record_pdu(0x18, execute_flag_value(flag), empty_bytes())
+            ExecuteWriteResponse                                               => op_pdu(0x19)
+            HandleValueNotification(handle, value)                             =>
+                word_bytes_pdu(0x1B, handle, value)
+            HandleValueIndication(handle, value)                               =>
+                word_bytes_pdu(0x1D, handle, value)
+            HandleValueConfirmation                                            => op_pdu(0x1E)
+        return wire
+
+// Why a PDU of a fixed shape did not match it: too short names the
+// bytes the opcode needed, and a longer one is bytes the opcode has no
+// room for, which is the same complaint as a ragged record list.
+fn fixed_refusal(have: Int, need: Int) -> AttDecodeError
+    system
+        if have < need
+            return AttPduTooShort(have: have, need: need)
+        return AttRaggedList(unit: need, actual: have)
+
+// Whether a byte count is a whole number of records of this width,
+// which is what every list-shaped response's length has to be.
+fn divides(unit: Int, count: Int) -> Bool
+    // cov: skip — no PDU reaches this guard: every caller has already refused a
+    // record width too small to hold a handle, so a unit below one can only come
+    // from a caller this module does not have.
+    if unit < 1
+        return false
+    count % unit == 0
+
+// The bytes a response has for its data once its fixed part is off,
+// which is never negative: an MTU below the floor is not a size, and a
+// walk answers the floor rather than a buffer that does not exist.
+fn data_room(mtu: Int, fixed: Int) -> Int
+    if mtu - fixed < 0
+        0
+    else
+        mtu - fixed
+
+// The format a Find Information response's byte names: 0x01 is the
+// 16-bit format and 0x02 the 128-bit one (§ 3.4.3.2).
+fn info_format_of(byte: Int) -> AttInfoFormat
+    if byte == 0x01
+        AttUuid16Format
+    else
+        AttUuid128Format
+
+// The byte a Find Information response's format is on the wire.
+fn info_format_byte(format: AttInfoFormat) -> Int
+    match format
+        AttUuid16Format  => 0x01
+        AttUuid128Format => 0x02
 
 // Read a PDU from an L2CAP payload.
 //
 // `bytes` is the payload of a frame on `CID`, with the four-byte L2CAP
 // header already off.
 pub fn decode(bytes: [u8]) -> Result<AttPdu, AttDecodeError>
-    todo("att.decode")
+    let n = list.len(bytes)
+    system
+        if n < 1
+            return Err(AttPduTooShort(have: n, need: 1))
+        let op = bytes[0] as Int
+        // Each arm states its own fixed part, so a PDU that is one byte
+        // short is refused with the length it needed rather than parsed
+        // past its end.
+        if op == 0x01
+            if n != 5
+                return Err(fixed_refusal(n, 5))
+            return Ok(ErrorResponse(request_opcode: bytes[1] as Int,
+                                    handle: word_at(bytes, 2),
+                                    code: error_code_of(bytes[4] as Int)))
+        if op == 0x02
+            if n != 3
+                return Err(fixed_refusal(n, 3))
+            return Ok(ExchangeMtuRequest(client_rx_mtu: word_at(bytes, 1)))
+        if op == 0x03
+            if n != 3
+                return Err(fixed_refusal(n, 3))
+            return Ok(ExchangeMtuResponse(server_rx_mtu: word_at(bytes, 1)))
+        if op == 0x04
+            if n != 5
+                return Err(fixed_refusal(n, 5))
+            return Ok(FindInformationRequest(starting_handle: word_at(bytes, 1),
+                                             ending_handle: word_at(bytes, 3)))
+        if op == 0x05
+            if n < 2
+                return Err(AttPduTooShort(have: n, need: 2))
+            let format = bytes[1] as Int
+            // The format byte decides the pair width, and 0x01 and 0x02
+            // are the only widths the specification defines: a peer
+            // that invents a third one has sent pairs no client can
+            // split, so unit 0 says no width in it fits.
+            if format != 0x01 and format != 0x02
+                return Err(AttRaggedList(unit: 0, actual: n - 2))
+            let unit = if format == 0x01
+                4
+            else
+                18
+            if not divides(unit, n - 2)
+                return Err(AttRaggedList(unit: unit, actual: n - 2))
+            return Ok(FindInformationResponse(format: info_format_of(format),
+                                              data: copy_range(bytes, 2, n)))
+        if op == 0x06
+            if n < 7
+                return Err(AttPduTooShort(have: n, need: 7))
+            return Ok(FindByTypeValueRequest(starting_handle: word_at(bytes, 1),
+                                             ending_handle: word_at(bytes, 3),
+                                             attribute_type: word_at(bytes, 5),
+                                             attribute_value: copy_range(bytes, 7, n)))
+        if op == 0x07
+            if not divides(4, n - 1)
+                return Err(AttRaggedList(unit: 4, actual: n - 1))
+            return Ok(FindByTypeValueResponse(data: copy_range(bytes, 1, n)))
+        if op == 0x08 or op == 0x10
+            // The two requests that name a type outright: a UUID of
+            // either width, which is the rest of the PDU.
+            if n < 7
+                return Err(AttPduTooShort(have: n, need: 7))
+            let parsed: Result<AttPdu, AttDecodeError> = match decode_uuid(copy_range(bytes, 5, n))
+                Ok(uuid) =>
+                    if op == 0x08
+                        Ok(ReadByTypeRequest(starting_handle: word_at(bytes, 1),
+                                             ending_handle: word_at(bytes, 3),
+                                             attribute_type: uuid))
+                    else
+                        Ok(ReadByGroupTypeRequest(starting_handle: word_at(bytes, 1),
+                                                  ending_handle: word_at(bytes, 3),
+                                                  group_type: uuid))
+                Err(e)   => Err(e)
+            return parsed
+        if op == OP_READ_BY_TYPE_RESPONSE
+            if n < 2
+                return Err(AttPduTooShort(have: n, need: 2))
+            // A pair is a two-byte handle and at least one byte of
+            // value, and the response's data is a whole number of them
+            // (§ 3.4.4.1).
+            let pair = bytes[1] as Int
+            if pair < 3 or not divides(pair, n - 2)
+                return Err(AttRaggedList(unit: pair, actual: n - 2))
+            return Ok(ReadByTypeResponse(pair_length: pair, data: copy_range(bytes, 2, n)))
+        if op == OP_READ_REQUEST
+            if n != 3
+                return Err(fixed_refusal(n, 3))
+            return Ok(ReadRequest(handle: word_at(bytes, 1)))
+        if op == 0x0B
+            return Ok(ReadResponse(value: copy_range(bytes, 1, n)))
+        if op == 0x0C
+            if n != 5
+                return Err(fixed_refusal(n, 5))
+            return Ok(ReadBlobRequest(handle: word_at(bytes, 1),
+                                      offset: word_at(bytes, 3)))
+        if op == OP_READ_BLOB_RESPONSE
+            return Ok(ReadBlobResponse(part: copy_range(bytes, 1, n)))
+        if op == 0x0E
+            if not divides(2, n - 1)
+                return Err(AttRaggedList(unit: 2, actual: n - 1))
+            var handles: [Int] = list.with_capacity((n - 1) / 2)
+            for i in 0..(n - 1) / 2
+                let _ = list.try_push(handles, word_at(bytes, 1 + i * 2))
+            return Ok(ReadMultipleRequest(handles: handles))
+        if op == 0x0F
+            // No lengths, so every byte count is a whole number of the
+            // values a client has to know the widths of itself.
+            return Ok(ReadMultipleResponse(values: copy_range(bytes, 1, n)))
+        if op == 0x11
+            if n < 2
+                return Err(AttPduTooShort(have: n, need: 2))
+            // A triplet is two handles and at least one byte of value
+            // (§ 3.4.4.9).
+            let triplet = bytes[1] as Int
+            if triplet < 5 or not divides(triplet, n - 2)
+                return Err(AttRaggedList(unit: triplet, actual: n - 2))
+            return Ok(ReadByGroupTypeResponse(triplet_length: triplet,
+                                              data: copy_range(bytes, 2, n)))
+        if op == 0x12 or op == OP_WRITE_COMMAND
+            if n < 3
+                return Err(AttPduTooShort(have: n, need: 3))
+            let value = copy_range(bytes, 3, n)
+            if op == 0x12
+                return Ok(WriteRequest(handle: word_at(bytes, 1), value: value))
+            return Ok(WriteCommand(handle: word_at(bytes, 1), value: value))
+        if op == 0x13
+            if n != 1
+                return Err(fixed_refusal(n, 1))
+            return Ok(WriteResponse)
+        if op == 0x16 or op == 0x17
+            if n < 5
+                return Err(AttPduTooShort(have: n, need: 5))
+            let part = copy_range(bytes, 5, n)
+            if op == 0x16
+                return Ok(PrepareWriteRequest(handle: word_at(bytes, 1),
+                                              offset: word_at(bytes, 3),
+                                              part: part))
+            return Ok(PrepareWriteResponse(handle: word_at(bytes, 1),
+                                           offset: word_at(bytes, 3),
+                                           part: part))
+        if op == 0x18
+            if n != 2
+                return Err(fixed_refusal(n, 2))
+            // The flag is one byte and the specification defines two
+            // values for it; anything else is a request whose effect no
+            // server can carry out.
+            let flag = bytes[1] as Int
+            if flag == EXECUTE_WRITE_CANCEL
+                return Ok(ExecuteWriteRequest(flag: AttCancelPrepared))
+            if flag == EXECUTE_WRITE_PREPARE
+                return Ok(ExecuteWriteRequest(flag: AttWritePrepared))
+            return Err(AttRaggedList(unit: 0, actual: flag))
+        if op == 0x19
+            if n != 1
+                return Err(fixed_refusal(n, 1))
+            return Ok(ExecuteWriteResponse)
+        if op == 0x1B
+            if n < 3
+                return Err(AttPduTooShort(have: n, need: 3))
+            return Ok(HandleValueNotification(handle: word_at(bytes, 1),
+                                              value: copy_range(bytes, 3, n)))
+        if op == 0x1D
+            if n < 3
+                return Err(AttPduTooShort(have: n, need: 3))
+            return Ok(HandleValueIndication(handle: word_at(bytes, 1),
+                                            value: copy_range(bytes, 3, n)))
+        if op == 0x1E
+            if n != 1
+                return Err(fixed_refusal(n, 1))
+            return Ok(HandleValueConfirmation)
+        if op == 0xD2
+            // The signed write carries its signature last, twelve bytes
+            // that this package hands over without checking (§ 3.4.6.1).
+            if n < 15
+                return Err(AttPduTooShort(have: n, need: 15))
+            return Ok(SignedWriteCommand(handle: word_at(bytes, 1),
+                                         value: copy_range(bytes, 3, n - 12),
+                                         signature: copy_range(bytes, n - 12, n)))
+        return Err(AttUnknownOpcode(op))
 
 // The opcode byte a PDU carries.
 pub fn opcode(pdu: AttPdu) -> Int
-    todo("att.opcode")
+    match pdu
+        ErrorResponse(_, _, _)             => 0x01
+        ExchangeMtuRequest(_)              => 0x02
+        ExchangeMtuResponse(_)             => 0x03
+        FindInformationRequest(_, _)       => 0x04
+        FindInformationResponse(_, _)      => 0x05
+        FindByTypeValueRequest(_, _, _, _) => 0x06
+        FindByTypeValueResponse(_)         => 0x07
+        ReadByTypeRequest(_, _, _)         => 0x08
+        ReadByTypeResponse(_, _)           => OP_READ_BY_TYPE_RESPONSE
+        ReadRequest(_)                     => OP_READ_REQUEST
+        ReadResponse(_)                    => 0x0B
+        ReadBlobRequest(_, _)              => 0x0C
+        ReadBlobResponse(_)                => OP_READ_BLOB_RESPONSE
+        ReadMultipleRequest(_)             => 0x0E
+        ReadMultipleResponse(_)            => 0x0F
+        ReadByGroupTypeRequest(_, _, _)    => 0x10
+        ReadByGroupTypeResponse(_, _)      => 0x11
+        WriteRequest(_, _)                 => 0x12
+        WriteResponse                      => 0x13
+        WriteCommand(_, _)                 => OP_WRITE_COMMAND
+        SignedWriteCommand(_, _, _)        => 0xD2
+        PrepareWriteRequest(_, _, _)       => 0x16
+        PrepareWriteResponse(_, _, _)      => 0x17
+        ExecuteWriteRequest(_)             => 0x18
+        ExecuteWriteResponse               => 0x19
+        HandleValueNotification(_, _)      => 0x1B
+        HandleValueIndication(_, _)        => 0x1D
+        HandleValueConfirmation            => 0x1E
 
 // The six-bit method of an opcode (§ 3.3.1).
 //
@@ -245,16 +871,18 @@ pub fn opcode(pdu: AttPdu) -> Int
 // and a Write Command differ in one bit and share a method; this is the
 // part a dispatch table indexes.
 pub fn opcode_method(opcode: Int) -> Int
-    todo("att.opcode_method")
+    // The top two bits are the command and signature flags, so a Write
+    // Request and a Write Command are one method apart (§ 3.3.1).
+    opcode & 0x3F
 
 // Whether an opcode's command bit is set — a PDU the peer expects no
 // answer to.
 pub fn opcode_is_command(opcode: Int) -> Bool
-    todo("att.opcode_is_command")
+    (opcode & 0x40) != 0
 
 // Whether an opcode's authentication-signature bit is set.
 pub fn opcode_is_signed(opcode: Int) -> Bool
-    todo("att.opcode_is_signed")
+    (opcode & 0x80) != 0
 
 // Whether a PDU is a request the peer owes exactly one answer to.
 //
@@ -263,11 +891,40 @@ pub fn opcode_is_signed(opcode: Int) -> Bool
 // before the first is answered has broken the protocol.  The rule is
 // the caller's to enforce; this is the predicate it needs.
 pub fn is_request(pdu: AttPdu) -> Bool
-    todo("att.is_request")
+    match pdu
+        ErrorResponse(_, _, _)             => false
+        ExchangeMtuRequest(_)              => true
+        ExchangeMtuResponse(_)             => false
+        FindInformationRequest(_, _)       => true
+        FindInformationResponse(_, _)      => false
+        FindByTypeValueRequest(_, _, _, _) => true
+        FindByTypeValueResponse(_)         => false
+        ReadByTypeRequest(_, _, _)         => true
+        ReadByTypeResponse(_, _)           => false
+        ReadRequest(_)                     => true
+        ReadResponse(_)                    => false
+        ReadBlobRequest(_, _)              => true
+        ReadBlobResponse(_)                => false
+        ReadMultipleRequest(_)             => true
+        ReadMultipleResponse(_)            => false
+        ReadByGroupTypeRequest(_, _, _)    => true
+        ReadByGroupTypeResponse(_, _)      => false
+        WriteRequest(_, _)                 => true
+        WriteResponse                      => false
+        WriteCommand(_, _)                 => false
+        SignedWriteCommand(_, _, _)        => false
+        PrepareWriteRequest(_, _, _)       => true
+        PrepareWriteResponse(_, _, _)      => false
+        ExecuteWriteRequest(_)             => true
+        ExecuteWriteResponse               => false
+        HandleValueNotification(_, _)      => false
+        HandleValueIndication(_, _)        => false
+        HandleValueConfirmation            => false
 
 // The PDU as a frame on ATT's channel, ready for l2cap-nv to encode.
 pub fn frame(pdu: AttPdu) -> L2capFrame
-    todo("att.frame")
+    system
+        return L2capFrame { cid: CID, payload: encode(pdu) }
 
 // Read a PDU out of an L2CAP frame.
 //
@@ -288,7 +945,10 @@ pub fn frame(pdu: AttPdu) -> L2capFrame
 //                 _                   => println("something else")
 // ```
 pub fn from_frame(frame: L2capFrame) -> Result<AttPdu, AttDecodeError>
-    todo("att.from_frame")
+    system
+        if frame.cid != CID
+            return Err(AttWrongChannel(frame.cid))
+        return decode(frame.payload)
 
 // ── The attribute database ──────────────────────────────────────────
 //
@@ -351,19 +1011,50 @@ pub struct AttHandleRange
 // wrong question quietly.  Two rows claiming the same handle are not a
 // table at all and are refused, which is why this returns a `Result`.
 pub fn database(attributes: [AttAttribute]) -> Result<AttDatabase, AttDecodeError>
-    todo("att.database")
+    let n = list.len(attributes)
+    system
+        // Every walk below assumes ascending handles, so the rows are
+        // placed in order rather than trusted to arrive in it.  It is a
+        // selection scan rather than a sort call because the embedded
+        // tier admits no sort, and a table of a profile's rows is small.
+        var rows: [AttAttribute] = list.with_capacity(n)
+        var last = -1
+        for i in 0..n
+            var pick = -1
+            for j in 0..n
+                if attributes[j].handle > last
+                    if pick < 0 or attributes[j].handle < attributes[pick].handle
+                        pick = j
+            if pick < 0
+                // Every row left claims a handle already placed, which
+                // is two attributes at one handle: not a table at all.
+                return Err(AttRaggedList(unit: 0, actual: n))
+            let _ = list.try_push(rows, attributes[pick])
+            last = attributes[pick].handle
+        return Ok(AttDatabase { attributes: rows })
 
 // How many rows the database holds.
 pub fn attribute_count(db: AttDatabase) -> Int
-    todo("att.attribute_count")
+    list.len(db.attributes)
 
 // The row at a handle, or `None` when no attribute has it.
 pub fn attribute_at(db: AttDatabase, handle: Int) -> ?AttAttribute
-    todo("att.attribute_at")
+    system
+        for i in 0..list.len(db.attributes)
+            if db.attributes[i].handle == handle
+                return Some(db.attributes[i])
+        return None
 
 // The span of handles the database covers.
 pub fn handle_range(db: AttDatabase) -> AttHandleRange
-    todo("att.handle_range")
+    let n = list.len(db.attributes)
+    system
+        if n == 0
+            // An empty database reports first greater than last, which
+            // is the only pair of numbers that cannot be a real range.
+            return AttHandleRange { first: 1, last: 0 }
+        return AttHandleRange { first: db.attributes[0].handle,
+                                last: db.attributes[n - 1].handle }
 
 // The rows whose handles fall inside a request's range, in order.
 //
@@ -373,7 +1064,21 @@ pub fn handle_range(db: AttDatabase) -> AttHandleRange
 // the classic ATT server bug: both handles are INCLUSIVE.
 pub fn attributes_in_range(db: AttDatabase, starting_handle: Int,
                            ending_handle: Int) -> [AttAttribute]
-    todo("att.attributes_in_range")
+    var count = 0
+    for i in 0..list.len(db.attributes)
+        let a = db.attributes[i]
+        if a.handle >= starting_handle and a.handle <= ending_handle
+            count = count + 1
+    system
+        // Sized to the range and not to the table: the caller is a walk
+        // that fills a response from these rows, and a device has no
+        // room for the whole table twice.
+        var rows: [AttAttribute] = list.with_capacity(count)
+        for i in 0..list.len(db.attributes)
+            let a = db.attributes[i]
+            if a.handle >= starting_handle and a.handle <= ending_handle
+                let _ = list.try_push(rows, a)
+        return rows
 
 // ── The walks a GATT server performs ────────────────────────────────
 //
@@ -384,6 +1089,26 @@ pub fn attributes_in_range(db: AttDatabase, starting_handle: Int,
 // and a caller that had to turn a refusal into an Error Response itself
 // would be writing the protocol a second time.
 
+// The Error Response a request is refused with: the request's own
+// opcode, the handle it named, and why.  Every walk answers with a PDU
+// and this is the one four of them answer a refusal with.
+fn refusal(request_opcode: Int, handle: Int, code: AttErrorCode) -> AttPdu
+    system
+        return ErrorResponse(request_opcode: request_opcode, handle: handle, code: code)
+
+// The first n bytes of a value, for a response that has room for only
+// that many.  Nothing to take is an empty buffer and not a negative
+// one.
+fn first_bytes(bytes: [u8], n: Int) -> [u8]
+    let take = if n < list.len(bytes)
+        n
+    else
+        list.len(bytes)
+    system
+        if take <= 0
+            return empty_bytes()
+        return copy_range(bytes, 0, take)
+
 // Find Information: handle-and-UUID pairs over a range (§ 3.4.3.1).
 //
 // The response is in one format for all its pairs, which is the
@@ -391,7 +1116,32 @@ pub fn attributes_in_range(db: AttDatabase, starting_handle: Int,
 // 128-bit types stops at the first change of width.
 pub fn find_information(db: AttDatabase, starting_handle: Int, ending_handle: Int,
                         mtu: Int) -> AttPdu
-    todo("att.find_information")
+    let rows = attributes_in_range(db, starting_handle, ending_handle)
+    if list.is_empty(rows)
+        system
+            return refusal(0x04, starting_handle, AttAttributeNotFound)
+    system
+        // The format is the first row's width and the whole response is
+        // in it, so a row of the other width ends the list rather than
+        // mixing pairs no client can split (§ 3.4.3.2).
+        let width = uuid_wire_len(rows[0].attribute_type)
+        let format = if width == 16
+            AttUuid128Format
+        else
+            AttUuid16Format
+        let room = data_room(mtu, 2)
+        var data: [u8] = list.with_capacity(room)
+        for i in 0..list.len(rows)
+            let a = rows[i]
+            if uuid_wire_len(a.attribute_type) != width
+                return FindInformationResponse(format: format, data: data)
+            if list.len(data) + 2 + width > room
+                return FindInformationResponse(format: format, data: data)
+            let _ = list.try_push(data, (a.handle & 0xFF) as u8)
+            let _ = list.try_push(data, ((a.handle >> 8) & 0xFF) as u8)
+            for b in encode_uuid(a.attribute_type)
+                let _ = list.try_push(data, b)
+        return FindInformationResponse(format: format, data: data)
 
 // Find By Type Value: the handle groups whose type and value both match
 // (§ 3.4.3.3).
@@ -402,7 +1152,26 @@ pub fn find_information(db: AttDatabase, starting_handle: Int, ending_handle: In
 // instead.
 pub fn find_by_type_value(db: AttDatabase, starting_handle: Int, ending_handle: Int,
                           attribute_type: Int, attribute_value: [u8], mtu: Int) -> AttPdu
-    todo("att.find_by_type_value")
+    let rows = attributes_in_range(db, starting_handle, ending_handle)
+    system
+        // The record is the handle and the group's end handle, and the
+        // value must be the whole value: a partial match would report a
+        // group whose value is some other one's prefix (§ 3.4.3.3).
+        let wanted = AttUuid16(attribute_type)
+        let room = data_room(mtu, 1)
+        var data: [u8] = list.with_capacity(room)
+        for i in 0..list.len(rows)
+            let a = rows[i]
+            if uuid_eq(a.attribute_type, wanted) and bytes_equal(a.value, attribute_value)
+                if list.len(data) + 4 > room
+                    return FindByTypeValueResponse(data: data)
+                let _ = list.try_push(data, (a.handle & 0xFF) as u8)
+                let _ = list.try_push(data, ((a.handle >> 8) & 0xFF) as u8)
+                let _ = list.try_push(data, (a.end_group_handle & 0xFF) as u8)
+                let _ = list.try_push(data, ((a.end_group_handle >> 8) & 0xFF) as u8)
+        if list.is_empty(data)
+            return refusal(0x06, starting_handle, AttAttributeNotFound)
+        return FindByTypeValueResponse(data: data)
 
 // Read By Type: handle-and-value pairs for one attribute type
 // (§ 3.4.4.1).
@@ -412,7 +1181,42 @@ pub fn find_by_type_value(db: AttDatabase, starting_handle: Int, ending_handle: 
 // which is the rule a server that only checked the MTU gets wrong.
 pub fn read_by_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
                     attribute_type: AttUuid, mtu: Int) -> AttPdu
-    todo("att.read_by_type")
+    let rows = attributes_in_range(db, starting_handle, ending_handle)
+    system
+        let room = data_room(mtu, 2)
+        // A pair is a two-byte handle and its value, and the length of
+        // the value goes in one byte, which is what caps it at 253.
+        let max_value = if room - 2 < 253
+            room - 2
+        else
+            253
+        var data: [u8] = list.with_capacity(room)
+        var pair = 0
+        for i in 0..list.len(rows)
+            let a = rows[i]
+            if uuid_eq(a.attribute_type, attribute_type)
+                let value = first_bytes(a.value, max_value)
+                if pair == 0
+                    pair = 2 + list.len(value)
+                if 2 + list.len(value) != pair
+                    return ReadByTypeResponse(pair_length: pair, data: data)
+                if list.len(data) + pair > room
+                    return ReadByTypeResponse(pair_length: pair, data: data)
+                let _ = list.try_push(data, (a.handle & 0xFF) as u8)
+                let _ = list.try_push(data, ((a.handle >> 8) & 0xFF) as u8)
+                for b in value
+                    let _ = list.try_push(data, b)
+        if list.is_empty(data)
+            return refusal(0x08, starting_handle, AttAttributeNotFound)
+        return ReadByTypeResponse(pair_length: pair, data: data)
+
+// Whether a UUID is one a Read By Group Type request may ask for.  The
+// grouping types are 0x2800 and 0x2801, and a client may spell either
+// out in full (§ 3.4.4.9).
+fn is_grouping_type(group_type: AttUuid) -> Bool
+    match group_type
+        AttUuid16(value) => value == 0x2800 or value == 0x2801
+        AttUuid128(wide) => short_matches(0x2800, wide) or short_matches(0x2801, wide)
 
 // Read By Group Type: handle, end-group handle and value, for a
 // grouping type (§ 3.4.4.9).
@@ -432,11 +1236,50 @@ pub fn read_by_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
 // ```
 pub fn read_by_group_type(db: AttDatabase, starting_handle: Int, ending_handle: Int,
                           group_type: AttUuid, mtu: Int) -> AttPdu
-    todo("att.read_by_group_type")
+    if not is_grouping_type(group_type)
+        system
+            return refusal(0x10, starting_handle, AttUnsupportedGroupType)
+    let rows = attributes_in_range(db, starting_handle, ending_handle)
+    system
+        let room = data_room(mtu, 2)
+        // A triplet is two handles and the group's value, and its
+        // length goes in one byte, which is what caps the value at 251.
+        let max_value = if room - 4 < 251
+            room - 4
+        else
+            251
+        var data: [u8] = list.with_capacity(room)
+        var triplet = 0
+        for i in 0..list.len(rows)
+            let a = rows[i]
+            if uuid_eq(a.attribute_type, group_type)
+                let value = first_bytes(a.value, max_value)
+                if triplet == 0
+                    triplet = 4 + list.len(value)
+                if 4 + list.len(value) != triplet
+                    return ReadByGroupTypeResponse(triplet_length: triplet, data: data)
+                if list.len(data) + triplet > room
+                    return ReadByGroupTypeResponse(triplet_length: triplet, data: data)
+                let _ = list.try_push(data, (a.handle & 0xFF) as u8)
+                let _ = list.try_push(data, ((a.handle >> 8) & 0xFF) as u8)
+                let _ = list.try_push(data, (a.end_group_handle & 0xFF) as u8)
+                let _ = list.try_push(data, ((a.end_group_handle >> 8) & 0xFF) as u8)
+                for b in value
+                    let _ = list.try_push(data, b)
+        if list.is_empty(data)
+            return refusal(0x10, starting_handle, AttAttributeNotFound)
+        return ReadByGroupTypeResponse(triplet_length: triplet, data: data)
 
 // Read: the whole value at a handle, truncated to the MTU (§ 3.4.4.3).
 pub fn read(db: AttDatabase, handle: Int, mtu: Int) -> AttPdu
-    todo("att.read")
+    let Some(a) = attribute_at(db, handle) else
+        system
+            return refusal(0x0A, handle, AttAttributeNotFound)
+    system
+        // One opcode byte, so the value has at most mtu - 1 bytes, and
+        // a longer one is cut rather than refused: a client reads the
+        // rest with Read Blob (§ 3.4.4.4).
+        return ReadResponse(value: first_bytes(a.value, data_room(mtu, 1)))
 
 // Read Blob: the value at a handle from an offset (§ 3.4.4.5).
 //
@@ -444,7 +1287,23 @@ pub fn read(db: AttDatabase, handle: Int, mtu: Int) -> AttPdu
 // exactly at the end is an empty Read Blob Response, which is how a
 // client learns it has the whole value.
 pub fn read_blob(db: AttDatabase, handle: Int, offset: Int, mtu: Int) -> AttPdu
-    todo("att.read_blob")
+    let Some(a) = attribute_at(db, handle) else
+        system
+            return refusal(0x0C, handle, AttAttributeNotFound)
+    let n = list.len(a.value)
+    if offset < 0 or offset > n
+        system
+            return refusal(0x0C, handle, AttInvalidOffset)
+    system
+        // An offset exactly at the end is an empty response rather than
+        // a fault, which is how a client learns it has the whole value
+        // (§ 3.4.4.6).
+        let room = offset + data_room(mtu, 1)
+        let end = if room < n
+            room
+        else
+            n
+        return ReadBlobResponse(part: copy_range(a.value, offset, end))
 
 // Read Multiple: the values at several handles, concatenated
 // (§ 3.4.4.7).
@@ -454,7 +1313,20 @@ pub fn read_blob(db: AttDatabase, handle: Int, offset: Int, mtu: Int) -> AttPdu
 // specification's design and this package reproduces it rather than
 // improving it.
 pub fn read_multiple(db: AttDatabase, handles: [Int], mtu: Int) -> AttPdu
-    todo("att.read_multiple")
+    system
+        let room = data_room(mtu, 1)
+        var values: [u8] = list.with_capacity(room)
+        for i in 0..list.len(handles)
+            let Some(a) = attribute_at(db, handles[i]) else
+                return refusal(0x0E, handles[i], AttAttributeNotFound)
+            // The response carries no lengths, so a value that does not
+            // fit whole would be split by the client at the wrong byte
+            // and the run ends here instead (§ 3.4.4.8).
+            if list.len(values) + list.len(a.value) > room
+                return ReadMultipleResponse(values: values)
+            for b in a.value
+                let _ = list.try_push(values, b)
+        return ReadMultipleResponse(values: values)
 
 // The Error Response a request would be refused with, or `None` when
 // the permissions allow it.
@@ -465,7 +1337,50 @@ pub fn read_multiple(db: AttDatabase, handles: [Int], mtu: Int) -> AttPdu
 // every walk above.
 pub fn permission_error(db: AttDatabase, handle: Int, writing: Bool, encrypted: Bool,
                         authenticated: Bool, key_size: Int) -> ?AttErrorCode
-    todo("att.permission_error")
+    let Some(a) = attribute_at(db, handle) else
+        system
+            // A handle that is not in the table has no permissions that
+            // could allow it; the walk that sent it here answers the
+            // peer an attribute that is not there.
+            return Some(AttAttributeNotFound)
+    system
+        let p = a.permissions
+        if writing and not p.writable
+            return Some(AttWriteNotPermitted)
+        if not writing and not p.readable
+            return Some(AttReadNotPermitted)
+        if p.encryption_required and not encrypted
+            return Some(AttInsufficientEncryption)
+        if p.minimum_key_size > 0 and key_size < p.minimum_key_size
+            return Some(AttInsufficientEncryptionKeySize)
+        if p.authentication_required and not authenticated
+            return Some(AttInsufficientAuthentication)
+        // Authorization is a decision this function is never told, so
+        // an attribute that demands one is refused here and a caller
+        // that has decided differently skips this call.
+        if p.authorization_required
+            return Some(AttInsufficientAuthorization)
+        return None
+
+// The database with one row's value replaced.  The bytes are copied
+// rather than held: a table outlives the buffer a request arrived in,
+// and a row that pointed at it would change under the table.
+fn with_value(db: AttDatabase, handle: Int, value: [u8]) -> AttDatabase
+    system
+        var rows: [AttAttribute] = list.with_capacity(list.len(db.attributes))
+        for i in 0..list.len(db.attributes)
+            let a = db.attributes[i]
+            if a.handle == handle
+                let replaced = AttAttribute {
+                    handle: a.handle,
+                    attribute_type: a.attribute_type,
+                    value: copy_range(value, 0, list.len(value)),
+                    end_group_handle: a.end_group_handle,
+                    permissions: a.permissions }
+                let _ = list.try_push(rows, replaced)
+            else
+                let _ = list.try_push(rows, a)
+        return AttDatabase { attributes: rows }
 
 // The database with one value replaced, for a write that the
 // permissions allow.
@@ -486,4 +1401,20 @@ pub struct AttWriteOutcome
 // first, through the same rule `permission_error` states.
 pub fn write(db: AttDatabase, handle: Int, value: [u8], encrypted: Bool, authenticated: Bool,
              key_size: Int) -> AttWriteOutcome
-    todo("att.write")
+    let Some(a) = attribute_at(db, handle) else
+        system
+            return AttWriteOutcome { database: db,
+                                     answer: refusal(0x12, handle, AttAttributeNotFound) }
+    system
+        let code = permission_error(db, handle, true, encrypted, authenticated, key_size)
+        let Some(c) = code else
+            // The permissions allowed it.  A value of a different
+            // length than the row held is refused rather than allowed
+            // to change the row's width.
+            if list.len(value) != list.len(a.value)
+                return AttWriteOutcome { database: db,
+                                         answer: refusal(0x12, handle,
+                                                         AttInvalidAttributeValueLength) }
+            return AttWriteOutcome { database: with_value(db, handle, value),
+                                     answer: WriteResponse }
+        return AttWriteOutcome { database: db, answer: refusal(0x12, handle, c) }

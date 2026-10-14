@@ -1,0 +1,1146 @@
+// tests/att_edge_tests.nv — the edges the API suite leaves.
+//
+// tests/att_tests.nv and tests/gatt_tests.nv walk one read-only Device
+// Information service and pin the specification's own byte strings.
+// This file takes what they do not: all twenty-eight PDUs once each
+// through encode and decode, the sentence every refusal answers, and
+// the branches a five-row read-only table cannot reach — a 128-bit
+// type, a write the permissions allow, an MTU below the floor, an empty
+// database, and the security answers the permission rule owes.
+
+use std.test
+use att
+use gatt
+
+// ── Fixtures ────────────────────────────────────────────────────────
+
+fn read_only() -> AttPermissions
+    AttPermissions {
+        readable: true,
+        writable: false,
+        encryption_required: false,
+        authentication_required: false,
+        authorization_required: false,
+        minimum_key_size: 0 }
+
+fn writable() -> AttPermissions
+    AttPermissions {
+        readable: true,
+        writable: true,
+        encryption_required: false,
+        authentication_required: false,
+        authorization_required: false,
+        minimum_key_size: 0 }
+
+fn hidden() -> AttPermissions
+    AttPermissions {
+        readable: false,
+        writable: false,
+        encryption_required: false,
+        authentication_required: false,
+        authorization_required: false,
+        minimum_key_size: 0 }
+
+// A permission with one thing required, so each rule of the permission
+// check can be asked on its own.
+fn secured(encryption: Bool, authentication: Bool, authorization: Bool,
+           key_size: Int) -> AttPermissions
+    AttPermissions {
+        readable: true,
+        writable: true,
+        encryption_required: encryption,
+        authentication_required: authentication,
+        authorization_required: authorization,
+        minimum_key_size: key_size }
+
+// A row whose value it holds itself: the handle is both the attribute's
+// own and the end of its group, which is what everything but a service
+// declaration carries.
+fn value_row(handle: Int, type16: Int, value: [u8], permissions: AttPermissions) -> AttAttribute
+    AttAttribute {
+        handle: handle,
+        attribute_type: AttUuid16(type16),
+        value: value,
+        end_group_handle: handle,
+        permissions: permissions }
+
+// A primary service declaration: type 0x2800 and the service's UUID as
+// the value, which is the row a Read By Group Type response reports.
+fn service_row(handle: Int, end_group: Int, uuid: AttUuid,
+               permissions: AttPermissions) -> AttAttribute
+    AttAttribute {
+        handle: handle,
+        attribute_type: AttUuid16(0x2800),
+        value: att.encode_uuid(uuid),
+        end_group_handle: end_group,
+        permissions: permissions }
+
+// The rows of a fixture have distinct handles, so this cannot refuse; a
+// panic here is this file's bug and not the package's.
+fn table(rows: [AttAttribute]) -> AttDatabase
+    let Ok(d) = att.database(rows) else core.panic.panic("att_edge_tests: the fixture handles are distinct")
+    d
+
+// A value of n bytes, 0x00 upwards, for the record caps: what a value
+// longer than one byte of length can describe is the cap's business.
+fn long_value(n: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..n
+        list.push(out, (i & 0xFF) as u8)
+    out
+
+// 0x2800 expanded against the Bluetooth base UUID: the type the
+// two-byte spelling names, in the width a client may also send it in.
+fn full_2800() -> [u8]
+    [0xFB as u8, 0x34 as u8, 0x9B as u8, 0x5F as u8,
+     0x80 as u8, 0x00 as u8, 0x00 as u8, 0x80 as u8,
+     0x00 as u8, 0x10 as u8, 0x00 as u8, 0x00 as u8,
+     0x00 as u8, 0x28 as u8, 0x00 as u8, 0x00 as u8]
+
+// 0x2A29 expanded the same way, for the tables whose rows carry a type
+// the short spelling has to match anyway.
+fn full_2a29() -> [u8]
+    [0xFB as u8, 0x34 as u8, 0x9B as u8, 0x5F as u8,
+     0x80 as u8, 0x00 as u8, 0x00 as u8, 0x80 as u8,
+     0x00 as u8, 0x10 as u8, 0x00 as u8, 0x00 as u8,
+     0x29 as u8, 0x2A as u8, 0x00 as u8, 0x00 as u8]
+
+// The error code a permission check names, or -1 when it allows the
+// access — which is a value an assert can be written against.
+fn refusal_code(db: AttDatabase, handle: Int, writing: Bool, encrypted: Bool, authenticated: Bool,
+                key_size: Int) -> Int
+    match att.permission_error(db, handle, writing, encrypted, authenticated, key_size)
+        None    => -1
+        Some(c) => att.error_code_value(c)
+
+// Every PDU the enum declares, and the opcode its own bytes carry, as
+// two lists one index apart.  Both are the specification's Table 3.1,
+// and the round trip below is what keeps them in step.
+fn every_pdu() -> [AttPdu]
+    [ErrorResponse(0x0A, 0x0001, AttReadNotPermitted),
+     ExchangeMtuRequest(247),
+     ExchangeMtuResponse(23),
+     FindInformationRequest(0x0001, 0xFFFF),
+     FindInformationResponse(AttUuid16Format,
+                             [0x01 as u8, 0x00 as u8, 0x00 as u8, 0x28 as u8]),
+     FindByTypeValueRequest(0x0001, 0xFFFF, 0x2800, [0x0A as u8, 0x18 as u8]),
+     FindByTypeValueResponse([0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8]),
+     ReadByTypeRequest(0x0001, 0xFFFF, AttUuid16(0x2803)),
+     ReadByTypeResponse(7, [0x02 as u8, 0x00 as u8, 0x02 as u8,
+                            0x03 as u8, 0x00 as u8, 0x29 as u8, 0x2A as u8]),
+     ReadRequest(0x0003),
+     ReadResponse([0x6E as u8, 0x6F as u8]),
+     ReadBlobRequest(0x0003, 0x0002),
+     ReadBlobResponse([0x76 as u8]),
+     ReadMultipleRequest([0x0003, 0x0005]),
+     ReadMultipleResponse([0x6E as u8, 0x6F as u8]),
+     ReadByGroupTypeRequest(0x0001, 0xFFFF, AttUuid128(full_2800())),
+     ReadByGroupTypeResponse(6, [0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8,
+                                 0x0A as u8, 0x18 as u8]),
+     WriteRequest(0x0003, [0x01 as u8]),
+     WriteResponse,
+     WriteCommand(0x0003, [0x01 as u8]),
+     SignedWriteCommand(0x0003, [0x01 as u8],
+                        [0x00 as u8, 0x01 as u8, 0x02 as u8, 0x03 as u8,
+                         0x04 as u8, 0x05 as u8, 0x06 as u8, 0x07 as u8,
+                         0x08 as u8, 0x09 as u8, 0x0A as u8, 0x0B as u8]),
+     PrepareWriteRequest(0x0003, 0x0000, [0x01 as u8]),
+     PrepareWriteResponse(0x0003, 0x0000, [0x01 as u8]),
+     ExecuteWriteRequest(AttCancelPrepared),
+     ExecuteWriteResponse,
+     HandleValueNotification(0x0003, [0x01 as u8]),
+     HandleValueIndication(0x0003, [0x01 as u8]),
+     HandleValueConfirmation]
+
+fn every_opcode() -> [Int]
+    [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+     0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x52, 0xD2, 0x16, 0x17, 0x18,
+     0x19, 0x1B, 0x1D, 0x1E]
+
+// ── The codec ───────────────────────────────────────────────────────
+
+@test
+fn test_every_pdu_answers_its_own_opcode_and_reads_back()
+    let pdus = every_pdu()
+    let opcodes = every_opcode()
+    test.assert_eq(list.len(pdus), 28)
+    test.assert_eq(list.len(opcodes), 28)
+    var requests = 0
+    for i in 0..list.len(pdus)
+        let pdu = pdus[i]
+        test.assert_eq(att.opcode(pdu), opcodes[i])
+        if att.is_request(pdu)
+            requests = requests + 1
+        let wire = att.encode(pdu)
+        test.assert_eq(wire[0] as Int, opcodes[i])
+        match att.decode(wire)
+            Ok(back) => test.assert_eq(att.opcode(back), opcodes[i])
+            Err(_)   => test.fail("what encode wrote, decode reads")
+    // One request at a time is the link's rule (§ 3.3), and eleven of
+    // the twenty-eight are requests.
+    test.assert_eq(requests, 11)
+
+@test
+fn test_the_opcode_byte_is_a_method_and_two_flags()
+    // A Write Request and a Write Command are one method apart, and the
+    // top two bits are the command and signature flags (§ 3.3.1).
+    test.assert_eq(att.opcode_method(0x12), 0x12)
+    test.assert_eq(att.opcode_method(0x52), 0x12)
+    test.assert_eq(att.opcode_method(0xD2), 0x12)
+    test.assert(not att.opcode_is_command(0x12))
+    test.assert(att.opcode_is_command(0x52))
+    test.assert(not att.opcode_is_signed(0x52))
+    test.assert(att.opcode_is_signed(0xD2))
+
+@test
+fn test_a_pdu_short_of_its_fixed_part_names_the_length()
+    // One byte missing from each opcode whose fixed part is longer than
+    // its opcode, and the empty payload: every refusal is the length it
+    // had and the length it needed.
+    let short: [[u8]] = [
+        [],
+        [0x01 as u8, 0x0A as u8, 0x01 as u8, 0x00 as u8],
+        [0x02 as u8],
+        [0x03 as u8, 0x17 as u8],
+        [0x04 as u8, 0x01 as u8, 0x00 as u8],
+        [0x05 as u8],
+        [0x06 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8, 0x00 as u8],
+        [0x08 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8, 0x00 as u8],
+        [0x09 as u8],
+        [0x0A as u8, 0x01 as u8],
+        [0x0C as u8, 0x01 as u8, 0x00 as u8],
+        [0x10 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8, 0x00 as u8],
+        [0x11 as u8],
+        [0x12 as u8, 0x01 as u8],
+        [0x16 as u8, 0x01 as u8, 0x00 as u8, 0x00 as u8],
+        [0x1B as u8, 0x01 as u8],
+        [0x1D as u8, 0x01 as u8],
+        [0x52 as u8, 0x01 as u8],
+        [0xD2 as u8, 0x01 as u8, 0x00 as u8, 0x00 as u8]]
+    for i in 0..list.len(short)
+        match att.decode(short[i])
+            Ok(_)  => test.fail("a pdu short of its fixed part is refused")
+            Err(e) =>
+                match e
+                    AttPduTooShort(have, need) => test.assert(need > have)
+                    _                          => test.fail("the refusal names the bytes it needed")
+
+@test
+fn test_a_byte_past_a_fixed_part_has_no_room()
+    // A PDU of a fixed shape has no field a longer payload could be: a
+    // byte past it is as wrong as a byte missing from it.
+    let long: [[u8]] = [
+        [0x01 as u8, 0x0A as u8, 0x01 as u8, 0x00 as u8, 0x02 as u8, 0x00 as u8],
+        [0x02 as u8, 0x17 as u8, 0x00 as u8, 0x00 as u8],
+        [0x03 as u8, 0x17 as u8, 0x00 as u8, 0x00 as u8],
+        [0x04 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8, 0x00 as u8],
+        [0x0A as u8, 0x01 as u8, 0x00 as u8, 0x00 as u8],
+        [0x0C as u8, 0x01 as u8, 0x00 as u8, 0x02 as u8, 0x00 as u8, 0x00 as u8],
+        [0x13 as u8, 0x00 as u8],
+        [0x18 as u8, 0x00 as u8, 0x00 as u8],
+        [0x19 as u8, 0x00 as u8],
+        [0x1E as u8, 0x00 as u8]]
+    for i in 0..list.len(long)
+        match att.decode(long[i])
+            Ok(_)  => test.fail("a byte past the fixed part has no room")
+            Err(e) =>
+                match e
+                    AttRaggedList(unit, _) => test.assert(unit > 0)
+                    _                      => test.fail("a fixed shape that is too long is ragged")
+
+@test
+fn test_a_record_list_that_is_not_whole_is_ragged()
+    // The unit is the record width the response declares, so a caller
+    // can say which width did not divide its data.
+    let ragged: [[u8]] = [
+        [0x05 as u8, 0x01 as u8, 0x01 as u8, 0x00 as u8],
+        [0x07 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8],
+        [0x09 as u8, 0x07 as u8, 0x02 as u8, 0x00 as u8, 0x01 as u8, 0x01 as u8],
+        [0x11 as u8, 0x06 as u8, 0x01 as u8, 0x00 as u8, 0x01 as u8, 0x01 as u8],
+        [0x0E as u8, 0x01 as u8, 0x00 as u8, 0x02 as u8],
+        [0x09 as u8, 0x02 as u8, 0x01 as u8, 0x00 as u8],
+        [0x11 as u8, 0x04 as u8, 0x01 as u8, 0x00 as u8, 0x01 as u8, 0x00 as u8]]
+    for i in 0..list.len(ragged)
+        match att.decode(ragged[i])
+            Ok(_)  => test.fail("a length that is not whole records is refused")
+            Err(e) =>
+                match e
+                    AttRaggedList(_, _) => test.assert(true)
+                    _                   => test.fail("the refusal is a ragged list")
+
+@test
+fn test_a_record_list_with_no_records_is_not_ragged()
+    // Zero is a whole number of records of any width: a walk that found
+    // nothing sent a response with no data, and the client's next
+    // request is what says so.
+    let empty: [[u8]] = [
+        [0x05 as u8, 0x01 as u8],
+        [0x07 as u8],
+        [0x09 as u8, 0x03 as u8],
+        [0x0E as u8],
+        [0x11 as u8, 0x05 as u8]]
+    for i in 0..list.len(empty)
+        match att.decode(empty[i])
+            Ok(_)  => test.assert(true)
+            Err(_) => test.fail("an empty record list is a whole one")
+
+@test
+fn test_a_format_or_flag_this_release_does_not_know_is_refused()
+    // The format byte decides the pair width and the flag decides what
+    // a server does: a third value in either is a message no client can
+    // split or any server carry out, and unit 0 is the width those
+    // refusals carry when none in the value fits.
+    match att.decode([0x05 as u8, 0x03 as u8, 0x00 as u8, 0x01 as u8])
+        Ok(_)  => test.fail("0x03 is neither uuid format")
+        Err(e) =>
+            match e
+                AttRaggedList(unit, actual) =>
+                    test.assert_eq(unit, 0)
+                    test.assert_eq(actual, 2)
+                _                           => test.fail("an unknown format is a ragged list")
+    match att.decode([0x18 as u8, 0x02 as u8])
+        Ok(_)  => test.fail("0x02 is neither execute write flag")
+        Err(e) =>
+            match e
+                AttRaggedList(unit, actual) =>
+                    test.assert_eq(unit, 0)
+                    test.assert_eq(actual, 2)
+                _                           => test.fail("an unknown flag is a ragged list")
+    // And the flag the specification does define comes back as itself.
+    match att.decode([0x18 as u8, 0x01 as u8])
+        Err(_)  => test.fail("two bytes are a whole request")
+        Ok(pdu) =>
+            match pdu
+                ExecuteWriteRequest(flag) =>
+                    match flag
+                        AttWritePrepared => test.assert(true)
+                        _                => test.fail("0x01 is write prepared")
+                _                         => test.fail("0x18 is an execute write request")
+
+@test
+fn test_a_type_of_no_uuid_width_is_refused_in_a_request()
+    // A Read By Type Request whose type field is three bytes is neither
+    // spelling of a UUID, and the refusal names the field's length.
+    match att.decode([0x08 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8,
+                      0x29 as u8, 0x2A as u8, 0x00 as u8])
+        Ok(_)  => test.fail("three bytes are neither uuid width")
+        Err(e) =>
+            match e
+                AttBadUuidLength(n) => test.assert_eq(n, 3)
+                _                   => test.fail("the refusal names the field's length")
+    // And the same request that asks for a group type.
+    match att.decode([0x10 as u8, 0x01 as u8, 0x00 as u8, 0x05 as u8, 0x00 as u8,
+                      0x00 as u8, 0x28 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("three bytes are neither uuid width")
+        Err(e) =>
+            match e
+                AttBadUuidLength(n) => test.assert_eq(n, 3)
+                _                   => test.fail("the refusal names the field's length")
+
+@test
+fn test_a_find_information_response_in_the_long_format_round_trips()
+    // The format byte decides the pair width, and 0x02 is eighteen
+    // bytes a pair: the handle and the whole UUID.
+    let pdu = FindInformationResponse(AttUuid128Format, [0x01 as u8, 0x00 as u8,
+                                                         0xFB as u8, 0x34 as u8,
+                                                         0x9B as u8, 0x5F as u8,
+                                                         0x80 as u8, 0x00 as u8,
+                                                         0x00 as u8, 0x80 as u8,
+                                                         0x00 as u8, 0x10 as u8,
+                                                         0x00 as u8, 0x00 as u8,
+                                                         0x00 as u8, 0x28 as u8,
+                                                         0x00 as u8, 0x00 as u8])
+    let wire = att.encode(pdu)
+    test.assert_eq(list.len(wire), 20)
+    test.assert_eq(wire[1] as Int, 0x02)
+    match att.decode(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            match back
+                FindInformationResponse(format, data) =>
+                    match format
+                        AttUuid128Format => test.assert(true)
+                        _                => test.fail("0x02 is the 128-bit format")
+                    test.assert_eq(list.len(data), 18)
+                _                                     => test.fail("0x05 is a find information response")
+
+@test
+fn test_the_other_execute_write_flag_is_its_own_byte()
+    // 0x00 cancels the prepared queue and 0x01 writes it, which is the
+    // one byte the two requests differ in.
+    let wire = att.encode(ExecuteWriteRequest(AttWritePrepared))
+    test.assert_eq(list.len(wire), 2)
+    test.assert_eq(wire[1] as Int, 0x01)
+    match att.decode(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            match back
+                ExecuteWriteRequest(flag) =>
+                    match flag
+                        AttWritePrepared => test.assert(true)
+                        _                => test.fail("0x01 is write prepared")
+                _                         => test.fail("0x18 is an execute write request")
+
+@test
+fn test_an_opcode_this_release_does_not_know_names_the_byte()
+    let unknown: [[u8]] = [[0x00 as u8], [0x14 as u8], [0x20 as u8], [0x40 as u8],
+                           [0x7F as u8], [0x80 as u8], [0xFF as u8]]
+    for i in 0..list.len(unknown)
+        match att.decode(unknown[i])
+            Ok(_)  => test.fail("a byte that names no PDU is not one")
+            Err(e) =>
+                match e
+                    AttUnknownOpcode(op) => test.assert_eq(op, unknown[i][0] as Int)
+                    _                    => test.fail("an unknown opcode is named by its byte")
+
+@test
+fn test_a_signed_write_hands_over_its_signature()
+    // D2, handle, one byte of value, twelve of signature: the last
+    // twelve bytes are the signature whatever the value holds.
+    let wire: [u8] = [0xD2 as u8, 0x03 as u8, 0x00 as u8, 0x01 as u8,
+                      0x00 as u8, 0x01 as u8, 0x02 as u8, 0x03 as u8,
+                      0x04 as u8, 0x05 as u8, 0x06 as u8, 0x07 as u8,
+                      0x08 as u8, 0x09 as u8, 0x0A as u8, 0x0B as u8]
+    match att.decode(wire)
+        Err(_)  => test.fail("sixteen bytes are a whole signed write")
+        Ok(pdu) =>
+            match pdu
+                SignedWriteCommand(handle, value, signature) =>
+                    test.assert_eq(handle, 0x0003)
+                    test.assert_eq(list.len(value), 1)
+                    test.assert_eq(list.len(signature), 12)
+                    test.assert_eq(signature[11] as Int, 0x0B)
+                _                                            => test.fail("0xD2 is a signed write command")
+    // An empty value is legal too: the signature is still the last
+    // twelve bytes, and the handle is still the two after the opcode.
+    let bare: [u8] = [0xD2 as u8, 0x03 as u8, 0x00 as u8,
+                      0x00 as u8, 0x01 as u8, 0x02 as u8, 0x03 as u8,
+                      0x04 as u8, 0x05 as u8, 0x06 as u8, 0x07 as u8,
+                      0x08 as u8, 0x09 as u8, 0x0A as u8, 0x0B as u8]
+    match att.decode(bare)
+        Err(_)  => test.fail("fifteen bytes are a signed write with no value")
+        Ok(pdu) =>
+            match pdu
+                SignedWriteCommand(handle, value, signature) =>
+                    test.assert_eq(handle, 0x0003)
+                    test.assert_eq(list.len(value), 0)
+                    test.assert_eq(list.len(signature), 12)
+                _                                            => test.fail("0xD2 is a signed write command")
+
+@test
+fn test_every_refusal_says_what_is_wrong()
+    // A caller that logs rather than branches reads these, so each one
+    // has to name the fault it was made from and no other.
+    let short = AttPduTooShort(have: 2, need: 5)
+    test.assert(short.message() == "att: 2 bytes is shorter than the 5 this opcode needs")
+    let unknown = AttUnknownOpcode(opcode: 0x7F)
+    test.assert(unknown.message() == "att: 127 is not an opcode this release knows")
+    let ragged = AttRaggedList(unit: 6, actual: 17)
+    test.assert(ragged.message() == "att: a record width of 6 does not divide 17")
+    let uuid = AttBadUuidLength(length: 3)
+    test.assert(uuid.message() == "att: a uuid field of 3 bytes is neither two nor sixteen")
+    let channel = AttWrongChannel(cid: 0x0005)
+    test.assert(channel.message() == "att: a frame on channel 5 is not the attribute channel")
+    let over = AttOverMtu(length: 30, mtu: 23)
+    test.assert(over.message() == "att: 30 bytes is more than the 23-byte mtu allows")
+
+@test
+fn test_every_byte_of_the_error_code_space_round_trips()
+    // error_code_of is total and error_code_value is its inverse on
+    // every byte: a peer that invents a code is reported rather than
+    // dropped, and the byte it sent survives the trip.
+    for b in 0..256
+        test.assert_eq(att.error_code_value(att.error_code_of(b)), b)
+    // The two ranges belong to somebody else and keep their number,
+    // down to the last byte of each.
+    match att.error_code_of(0x20)
+        AttReservedError(c) => test.assert_eq(c, 0x20)
+        _                   => test.fail("0x14..0x7F is not a code with a name")
+    match att.error_code_of(0x7F)
+        AttReservedError(c) => test.assert_eq(c, 0x7F)
+        _                   => test.fail("the reserved range ends at 0x7F")
+    match att.error_code_of(0x9F)
+        AttApplicationError(c) => test.assert_eq(c, 0x9F)
+        _                      => test.fail("0x80..0x9F belongs to the profile")
+    match att.error_code_of(0xE0)
+        AttCommonProfileError(c) => test.assert_eq(c, 0xE0)
+        _                        => test.fail("0xE0..0xFF belongs to the Supplement")
+
+@test
+fn test_the_uuid_comparison_spans_both_widths()
+    // The short and long spellings are one type whichever side they are
+    // on, and two long ones compare byte for byte.
+    test.assert(att.uuid_eq(AttUuid128(full_2800()), AttUuid16(0x2800)))
+    test.assert(att.uuid_eq(AttUuid16(0x2800), AttUuid128(full_2800())))
+    test.assert(att.uuid_eq(AttUuid128(full_2800()), AttUuid128(full_2800())))
+    // A long spelling of a different type is a different type, and so
+    // are two long ones that differ in one byte.
+    test.assert(not att.uuid_eq(AttUuid128(full_2a29()), AttUuid16(0x2800)))
+    test.assert(not att.uuid_eq(AttUuid16(0x2800), AttUuid128(full_2a29())))
+    test.assert(not att.uuid_eq(AttUuid128(full_2800()), AttUuid128(full_2a29())))
+    // A long spelling that does not carry the base UUID at all is not
+    // the type the number names, whatever its number bytes say.
+    test.assert(not att.uuid_eq(AttUuid128([0x00 as u8, 0x28 as u8]), AttUuid16(0x2800)))
+
+@test
+fn test_the_mtu_floor_holds_from_either_side()
+    // A peer below the floor gets the floor rather than a link that
+    // cannot carry a read response, on the offer and on the answer.
+    test.assert_eq(att.negotiated_mtu(517, 12), 23)
+    test.assert_eq(att.negotiated_mtu(12, 517), 23)
+    test.assert_eq(att.negotiated_mtu(12, 12), 23)
+
+// ── The walks ───────────────────────────────────────────────────────
+
+@test
+fn test_an_empty_database_answers_every_walk_with_not_found()
+    let none = table([])
+    test.assert_eq(att.attribute_count(none), 0)
+    // First greater than last is the only pair of numbers that cannot
+    // be a real range.
+    let span = att.handle_range(none)
+    test.assert_eq(span.first, 1)
+    test.assert_eq(span.last, 0)
+    test.assert_eq(list.len(att.attributes_in_range(none, 0x0001, 0xFFFF)), 0)
+    match att.attribute_at(none, 0x0001)
+        Some(_) => test.fail("an empty table has no rows")
+        None    => test.assert(true)
+    // Every walk answers the request's own opcode with Attribute Not
+    // Found, names the handle it was asked about, and keeps the table.
+    let refusals: [AttPdu] = [
+        att.find_information(none, 0x0001, 0xFFFF, 517),
+        att.find_by_type_value(none, 0x0001, 0xFFFF, 0x2800, [0x0A as u8], 517),
+        att.read_by_type(none, 0x0001, 0xFFFF, AttUuid16(0x2800), 517),
+        att.read_by_group_type(none, 0x0001, 0xFFFF, AttUuid16(0x2800), 517),
+        att.read(none, 0x0001, 23),
+        att.read_blob(none, 0x0001, 0, 23),
+        att.read_multiple(none, [0x0001], 23),
+        att.write(none, 0x0001, [0x01 as u8], false, false, 0).answer]
+    let refusals_ops: [Int] = [0x04, 0x06, 0x08, 0x10, 0x0A, 0x0C, 0x0E, 0x12]
+    test.assert_eq(list.len(refusals), list.len(refusals_ops))
+    for i in 0..list.len(refusals)
+        match refusals[i]
+            ErrorResponse(op, handle, code) =>
+                test.assert_eq(op, refusals_ops[i])
+                test.assert_eq(handle, 0x0001)
+                test.assert_eq(att.error_code_value(code), 0x0A)
+            _                               => test.fail("an empty table answers Attribute Not Found")
+    test.assert_eq(refusal_code(none, 0x0001, false, false, false, 0), 0x0A)
+    let outcome = att.write(none, 0x0001, [0x01 as u8], false, false, 0)
+    test.assert_eq(att.attribute_count(outcome.database), 0)
+
+@test
+fn test_the_range_ends_are_inclusive()
+    // The classic ATT server bug is a range that drops its own last
+    // handle; both ends are in.
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8], read_only()),
+        value_row(0x0002, 0x2A29, [0x6F as u8], read_only()),
+        value_row(0x0003, 0x2A29, [0x76 as u8], read_only())])
+    test.assert_eq(list.len(att.attributes_in_range(rows, 0x0001, 0x0003)), 3)
+    test.assert_eq(list.len(att.attributes_in_range(rows, 0x0002, 0x0002)), 1)
+    test.assert_eq(list.len(att.attributes_in_range(rows, 0x0003, 0x0003)), 1)
+    test.assert_eq(list.len(att.attributes_in_range(rows, 0x0004, 0xFFFF)), 0)
+    // And a database built from rows out of order walks in order.
+    let unordered = table([
+        value_row(0x0003, 0x2A29, [0x76 as u8], read_only()),
+        value_row(0x0001, 0x2A29, [0x6E as u8], read_only()),
+        value_row(0x0002, 0x2A29, [0x6F as u8], read_only())])
+    let first = att.attributes_in_range(unordered, 0x0001, 0xFFFF)
+    test.assert_eq(first[0].handle, 0x0001)
+    test.assert_eq(first[2].handle, 0x0003)
+
+@test
+fn test_two_rows_at_one_handle_are_not_a_database()
+    // Two attributes claiming a handle is not a table at all, and the
+    // refusal says so with no record width to name.
+    match att.database([
+            value_row(0x0001, 0x2A29, [0x6E as u8], read_only()),
+            value_row(0x0002, 0x2A29, [0x6F as u8], read_only()),
+            value_row(0x0002, 0x2A24, [0x76 as u8], read_only())])
+        Ok(_)  => test.fail("two rows at one handle are not a table")
+        Err(e) =>
+            match e
+                AttRaggedList(unit, actual) =>
+                    test.assert_eq(unit, 0)
+                    test.assert_eq(actual, 3)
+                _                           => test.fail("a duplicated handle is ragged with no width")
+
+@test
+fn test_find_information_is_one_width_for_all_of_its_pairs()
+    // A response's format byte is decided once, so a table that mixes
+    // the widths stops at the first row of the other one.
+    let mixed = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8], read_only()),
+        AttAttribute {
+            handle: 0x0002,
+            attribute_type: AttUuid128(full_2a29()),
+            value: [0x01 as u8],
+            end_group_handle: 0x0002,
+            permissions: read_only() }])
+    match att.find_information(mixed, 0x0001, 0xFFFF, 517)
+        FindInformationResponse(format, data) =>
+            match format
+                AttUuid16Format => test.assert(true)
+                _               => test.fail("the first row is a 16-bit type")
+            test.assert_eq(list.len(data), 4)
+        _                                     => test.fail("a range with a row is a response")
+    // A table whose first row is the long width answers in it: eighteen
+    // bytes a pair, the handle and the whole UUID.
+    let wide = table([
+        AttAttribute {
+            handle: 0x0001,
+            attribute_type: AttUuid128(full_2a29()),
+            value: [0x01 as u8],
+            end_group_handle: 0x0001,
+            permissions: read_only() }])
+    match att.find_information(wide, 0x0001, 0xFFFF, 517)
+        FindInformationResponse(format, data) =>
+            match format
+                AttUuid128Format => test.assert(true)
+                _                => test.fail("the first row is a 128-bit type")
+            test.assert_eq(list.len(data), 18)
+            // The pair is the handle then the UUID, little-endian.
+            test.assert_eq(data[0] as Int, 0x01)
+            test.assert_eq(data[2] as Int, 0xFB)
+            test.assert_eq(data[15] as Int, 0x2A)
+        _                                     => test.fail("a range with a row is a response")
+    // No room for even one pair is an empty response rather than a
+    // refusal: the format is still the first row's.
+    match att.find_information(mixed, 0x0001, 0xFFFF, 5)
+        FindInformationResponse(format, data) =>
+            match format
+                AttUuid16Format => test.assert(true)
+                _               => test.fail("the first row is a 16-bit type")
+            test.assert_eq(list.len(data), 0)
+        _                                     => test.fail("a range with a row is a response")
+
+@test
+fn test_find_by_type_value_matches_the_whole_value()
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8], read_only()),
+        value_row(0x0002, 0x2A29, [0x6E as u8], read_only())])
+    // The whole value is four bytes of record, and both rows match the
+    // type: the first value is the one asked for.
+    match att.find_by_type_value(rows, 0x0001, 0xFFFF, 0x2A29,
+                                 [0x6E as u8, 0x6F as u8], 517)
+        FindByTypeValueResponse(data) =>
+            test.assert_eq(list.len(data), 4)
+            test.assert_eq(data[0] as Int, 0x01)
+        _                             => test.fail("the row whose value matches is reported")
+    // A value that is only the first value's prefix is not a match, and
+    // neither is a value of another length.
+    match att.find_by_type_value(rows, 0x0001, 0xFFFF, 0x2A29, [0x6E as u8], 517)
+        FindByTypeValueResponse(data) =>
+            test.assert_eq(list.len(data), 4)
+            test.assert_eq(data[0] as Int, 0x02)
+        _                             => test.fail("only the row whose value is the one asked for matches")
+    match att.find_by_type_value(rows, 0x0001, 0xFFFF, 0x2A24, [0x6E as u8], 517)
+        ErrorResponse(op, handle, code) =>
+            test.assert_eq(op, 0x06)
+            test.assert_eq(handle, 0x0001)
+            test.assert_eq(att.error_code_value(code), 0x0A)
+        _                               => test.fail("no row of that type is Attribute Not Found")
+    // No room for a four-byte record is an empty response rather than a
+    // refusal, which is the shape every walk shares.
+    match att.find_by_type_value(rows, 0x0001, 0xFFFF, 0x2A29,
+                                 [0x6E as u8, 0x6F as u8], 4)
+        FindByTypeValueResponse(data) => test.assert_eq(list.len(data), 0)
+        _                             => test.fail("no room is an empty response")
+
+@test
+fn test_read_by_type_stops_at_a_change_of_value_width()
+    // Every pair in a response is the same length, so a row whose value
+    // is another length ends the list rather than producing a response
+    // a client cannot split.
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8], read_only()),
+        value_row(0x0002, 0x2A29, [0x6F as u8, 0x76 as u8], read_only()),
+        value_row(0x0003, 0x2A29, [0x4D as u8], read_only()),
+        value_row(0x0004, 0x2A24, [0x35 as u8], read_only())])
+    match att.read_by_type(rows, 0x0001, 0xFFFF, AttUuid16(0x2A29), 517)
+        ReadByTypeResponse(pair, data) =>
+            test.assert_eq(pair, 4)
+            test.assert_eq(list.len(data), 8)
+        _                              => test.fail("the third row's value is a different length")
+    // A type no row carries is Attribute Not Found, and so is a range
+    // that holds none of them.
+    match att.read_by_type(rows, 0x0004, 0xFFFF, AttUuid16(0x2A29), 517)
+        ErrorResponse(_, _, code) => test.assert_eq(att.error_code_value(code), 0x0A)
+        _                         => test.fail("a range with no such type is refused")
+    // Two pairs of four bytes fill six bytes of room with one, and the
+    // second is answered whole or not at all.
+    match att.read_by_type(rows, 0x0001, 0xFFFF, AttUuid16(0x2A29), 8)
+        ReadByTypeResponse(pair, data) =>
+            test.assert_eq(pair, 4)
+            test.assert_eq(list.len(data), 4)
+        _                              => test.fail("the second pair has no room")
+
+@test
+fn test_a_type_spelled_out_in_full_is_the_type_it_names()
+    // A client may send the 128-bit spelling of a 16-bit type, and a
+    // row carrying either spelling is the same type.
+    let wide = table([
+        AttAttribute {
+            handle: 0x0001,
+            attribute_type: AttUuid128(full_2a29()),
+            value: [0x6E as u8, 0x6F as u8],
+            end_group_handle: 0x0001,
+            permissions: read_only() }])
+    match att.read_by_type(wide, 0x0001, 0xFFFF, AttUuid16(0x2A29), 517)
+        ReadByTypeResponse(pair, data) =>
+            test.assert_eq(pair, 4)
+            test.assert_eq(list.len(data), 4)
+        _                              => test.fail("the long spelling of 0x2A29 is the type asked for")
+    match att.read_by_type(wide, 0x0001, 0xFFFF, AttUuid128(full_2a29()), 517)
+        ReadByTypeResponse(pair, data) =>
+            test.assert_eq(pair, 4)
+            test.assert_eq(list.len(data), 4)
+        _                              => test.fail("a row and a filter spelled the same way match")
+
+@test
+fn test_a_value_is_capped_at_what_one_length_byte_describes()
+    // A pair's value length is one byte, so a longer value is cut to
+    // 253 and the pair is 255: the cap the format itself imposes.
+    let rows = table([value_row(0x0001, 0x2A29, long_value(300), read_only())])
+    match att.read_by_type(rows, 0x0001, 0xFFFF, AttUuid16(0x2A29), 517)
+        ReadByTypeResponse(pair, data) =>
+            test.assert_eq(pair, 255)
+            test.assert_eq(list.len(data), 255)
+        _                              => test.fail("a 300-byte value is cut to what one byte describes")
+    // A triplet's is the same one byte, so its cap is 251 and the
+    // triplet is 255.
+    let services = table([
+        AttAttribute {
+            handle: 0x0001,
+            attribute_type: AttUuid16(0x2800),
+            value: long_value(300),
+            end_group_handle: 0x0001,
+            permissions: read_only() }])
+    match att.read_by_group_type(services, 0x0001, 0xFFFF, AttUuid16(0x2800), 517)
+        ReadByGroupTypeResponse(triplet, data) =>
+            test.assert_eq(triplet, 255)
+            test.assert_eq(list.len(data), 255)
+        _                                      => test.fail("a 300-byte group value is cut to what one byte describes")
+
+@test
+fn test_read_by_group_type_walks_only_a_grouping_type()
+    let rows = table([
+        service_row(0x0001, 0x0002, AttUuid16(0x180A), read_only()),
+        service_row(0x0002, 0x0003, AttUuid16(0x2800), read_only())])
+    // The 128-bit spelling of 0x2800 asks for the same walk, and hits
+    // both rows that carry the type: two triplets of six.
+    match att.read_by_group_type(rows, 0x0001, 0xFFFF, AttUuid128(full_2800()), 517)
+        ReadByGroupTypeResponse(triplet, data) =>
+            test.assert_eq(triplet, 6)
+            test.assert_eq(list.len(data), 12)
+            test.assert_eq(data[0] as Int, 0x01)
+            test.assert_eq(data[6] as Int, 0x02)
+        _                                      => test.fail("0x2800 spelled in full is the primary service type")
+    // 0x2801 is the other grouping type: legal to ask for, and a table
+    // without one is an empty answer rather than a refusal of the type.
+    match att.read_by_group_type(rows, 0x0001, 0xFFFF, AttUuid16(0x2801), 517)
+        ErrorResponse(op, _, code) =>
+            test.assert_eq(op, 0x10)
+            test.assert_eq(att.error_code_value(code), 0x0A)
+        _                          => test.fail("no secondary service is Attribute Not Found")
+    // A type that is not a grouping type at all is a different answer.
+    match att.read_by_group_type(rows, 0x0001, 0xFFFF, AttUuid16(0x2A29), 517)
+        ErrorResponse(op, _, code) =>
+            test.assert_eq(op, 0x10)
+            test.assert_eq(att.error_code_value(code), 0x10)
+        _                          => test.fail("0x2A29 is not a grouping type")
+    match att.read_by_group_type(rows, 0x0001, 0xFFFF, AttUuid128(full_2a29()), 517)
+        ErrorResponse(_, _, code) => test.assert_eq(att.error_code_value(code), 0x10)
+        _                         => test.fail("0x2A29 in full is not a grouping type either")
+
+@test
+fn test_read_by_group_type_stops_at_a_change_of_value_width()
+    // A triplet is the same length for every service in the response,
+    // and a service whose value is another width ends the list.
+    let mixed = table([
+        service_row(0x0001, 0x0002, AttUuid16(0x180A), read_only()),
+        AttAttribute {
+            handle: 0x0002,
+            attribute_type: AttUuid16(0x2800),
+            value: full_2a29(),
+            end_group_handle: 0x0003,
+            permissions: read_only() },
+        service_row(0x0003, 0x0004, AttUuid16(0x180F), read_only())])
+    match att.read_by_group_type(mixed, 0x0001, 0xFFFF, AttUuid16(0x2800), 517)
+        ReadByGroupTypeResponse(triplet, data) =>
+            test.assert_eq(triplet, 6)
+            test.assert_eq(list.len(data), 6)
+        _                                      => test.fail("the second service's value is a different width")
+    // Two services of the same width in seven bytes of room are one
+    // triplet, because the second has no room and a triplet is reported
+    // whole or not at all.
+    let two = table([
+        service_row(0x0001, 0x0002, AttUuid16(0x180A), read_only()),
+        service_row(0x0002, 0x0003, AttUuid16(0x180F), read_only())])
+    match att.read_by_group_type(two, 0x0001, 0xFFFF, AttUuid16(0x2800), 9)
+        ReadByGroupTypeResponse(triplet, data) =>
+            test.assert_eq(triplet, 6)
+            test.assert_eq(list.len(data), 6)
+        _                                      => test.fail("the second triplet has no room after the first")
+
+@test
+fn test_read_truncates_to_the_room_the_mtu_leaves()
+    let one = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8, 0x76 as u8], read_only())])
+    match att.read(one, 0x0001, 23)
+        ReadResponse(value) => test.assert_eq(list.len(value), 3)
+        _                   => test.fail("three bytes fit in the 22 an MTU leaves")
+    // A read is cut rather than refused, because Read Blob is how the
+    // rest of a long value arrives.
+    match att.read(one, 0x0001, 3)
+        ReadResponse(value) =>
+            test.assert_eq(list.len(value), 2)
+            test.assert_eq(value[0] as Int, 0x6E)
+        _                   => test.fail("a read truncates rather than refuses")
+    // No room at all is an empty value rather than a negative buffer.
+    match att.read(one, 0x0001, 0)
+        ReadResponse(value) => test.assert_eq(list.len(value), 0)
+        _                   => test.fail("no room is an empty value")
+
+@test
+fn test_read_blob_windows_a_value()
+    let one = table([
+        value_row(0x0001, 0x2A29,
+                  [0x6E as u8, 0x6F as u8, 0x76 as u8, 0x6F as u8], read_only())])
+    // The rest of the value when it fits.
+    match att.read_blob(one, 0x0001, 1, 23)
+        ReadBlobResponse(part) =>
+            test.assert_eq(list.len(part), 3)
+            test.assert_eq(part[0] as Int, 0x6F)
+        _                      => test.fail("the rest of a four-byte value fits in 22")
+    // And only what the room holds when it does not: an MTU of three
+    // leaves two bytes from the offset, which is the window.
+    match att.read_blob(one, 0x0001, 0, 3)
+        ReadBlobResponse(part) =>
+            test.assert_eq(list.len(part), 2)
+            test.assert_eq(part[1] as Int, 0x6F)
+        _                      => test.fail("a blob is cut to the room the MTU leaves")
+    // An offset at the end is an empty window, and one past it is a
+    // fault — the two answers a client reads the end of a value from.
+    match att.read_blob(one, 0x0001, 4, 23)
+        ReadBlobResponse(part) => test.assert_eq(list.len(part), 0)
+        _                      => test.fail("offset == length is the end")
+    match att.read_blob(one, 0x0001, 5, 23)
+        ErrorResponse(op, handle, code) =>
+            test.assert_eq(op, 0x0C)
+            test.assert_eq(handle, 0x0001)
+            test.assert_eq(att.error_code_value(code), 0x07)
+        _                               => test.fail("offset > length is Invalid Offset")
+
+@test
+fn test_read_multiple_stops_before_a_value_that_does_not_fit()
+    // The response carries no lengths, so a value that does not fit
+    // whole would be split by the client at the wrong byte: the run
+    // ends at the last value that fit.
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8], read_only()),
+        value_row(0x0002, 0x2A24, [0x4D as u8], read_only())])
+    match att.read_multiple(rows, [0x0001, 0x0002], 3)
+        ReadMultipleResponse(values) =>
+            test.assert_eq(list.len(values), 2)
+            test.assert_eq(values[0] as Int, 0x6E)
+        _                            => test.fail("the second value has no room after the first")
+    // The same two handles with the room for both.
+    match att.read_multiple(rows, [0x0001, 0x0002], 23)
+        ReadMultipleResponse(values) => test.assert_eq(list.len(values), 3)
+        _                            => test.fail("both values fit in 22")
+
+@test
+fn test_the_permission_rule_answers_one_rule_at_a_time()
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x01 as u8], writable()),
+        value_row(0x0002, 0x2A29, [0x01 as u8], hidden()),
+        value_row(0x0003, 0x2A29, [0x01 as u8], read_only()),
+        value_row(0x0004, 0x2A29, [0x01 as u8], secured(true, false, false, 0)),
+        value_row(0x0005, 0x2A29, [0x01 as u8], secured(false, false, false, 16)),
+        value_row(0x0006, 0x2A29, [0x01 as u8], secured(false, true, false, 0)),
+        value_row(0x0007, 0x2A29, [0x01 as u8], secured(false, false, true, 0))])
+    // What a permission does not allow, before what it needs.
+    test.assert_eq(refusal_code(rows, 0x0002, false, true, true, 16), 0x02)
+    test.assert_eq(refusal_code(rows, 0x0003, true, true, true, 16), 0x03)
+    test.assert_eq(refusal_code(rows, 0x0004, false, false, true, 16), 0x0F)
+    test.assert_eq(refusal_code(rows, 0x0005, false, true, true, 8), 0x0C)
+    test.assert_eq(refusal_code(rows, 0x0006, false, true, false, 16), 0x05)
+    // Authorization is never a state this function is told, so an
+    // attribute that demands one is refused however secure the link.
+    test.assert_eq(refusal_code(rows, 0x0007, false, true, true, 16), 0x08)
+    // And the link that meets every requirement is allowed.
+    test.assert_eq(refusal_code(rows, 0x0001, true, false, false, 0), -1)
+    test.assert_eq(refusal_code(rows, 0x0005, false, true, true, 16), -1)
+    test.assert_eq(refusal_code(rows, 0x0006, false, true, true, 16), -1)
+
+@test
+fn test_a_write_replaces_a_value_of_the_same_length()
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8, 0x76 as u8, 0x6F as u8],
+                  writable()),
+        value_row(0x0002, 0x2A24, [0x4D as u8, 0x35 as u8], read_only())])
+    let outcome = att.write(rows, 0x0001,
+                            [0x4E as u8, 0x4F as u8, 0x56 as u8, 0x4F as u8],
+                            false, false, 0)
+    match outcome.answer
+        WriteResponse => test.assert(true)
+        _             => test.fail("a write the permissions allow is answered")
+    // The new table holds the new bytes and the same rows, and the
+    // table the caller passed still holds the old ones: a database is a
+    // value, not a handle onto one.
+    test.assert_eq(att.attribute_count(outcome.database), 2)
+    match att.attribute_at(outcome.database, 0x0001)
+        Some(a) =>
+            test.assert_eq(list.len(a.value), 4)
+            test.assert_eq(a.value[0] as Int, 0x4E)
+        None    => test.fail("the row is still there")
+    match att.attribute_at(rows, 0x0001)
+        Some(a) => test.assert_eq(a.value[0] as Int, 0x6E)
+        None    => test.fail("the table that was passed kept its bytes")
+
+@test
+fn test_a_write_refuses_a_value_of_another_length()
+    let rows = table([value_row(0x0001, 0x2A29, [0x6E as u8, 0x6F as u8], writable())])
+    let outcome = att.write(rows, 0x0001, [0x4E as u8], false, false, 0)
+    match outcome.answer
+        ErrorResponse(op, handle, code) =>
+            test.assert_eq(op, 0x12)
+            test.assert_eq(handle, 0x0001)
+            test.assert_eq(att.error_code_value(code), 0x0D)
+        _                               => test.fail("a value of another length is refused")
+    test.assert_eq(att.attribute_count(outcome.database), 1)
+    match att.attribute_at(outcome.database, 0x0001)
+        Some(a) => test.assert_eq(list.len(a.value), 2)
+        None    => test.fail("the row is still there")
+
+@test
+fn test_a_write_a_security_rule_refuses_keeps_the_table()
+    let rows = table([
+        value_row(0x0001, 0x2A29, [0x01 as u8], secured(true, false, false, 0))])
+    let outcome = att.write(rows, 0x0001, [0x02 as u8], false, false, 0)
+    match outcome.answer
+        ErrorResponse(op, _, code) =>
+            test.assert_eq(op, 0x12)
+            test.assert_eq(att.error_code_value(code), 0x0F)
+        _                          => test.fail("an encrypted attribute needs an encrypted link")
+    match att.attribute_at(outcome.database, 0x0001)
+        Some(a) => test.assert_eq(a.value[0] as Int, 0x01)
+        None    => test.fail("the row is still there")
+
+// ── The declarations ────────────────────────────────────────────────
+
+@test
+fn test_the_properties_byte_round_trips_every_flag()
+    // Eight flags in one byte: the byte properties_of reads is the byte
+    // properties_byte writes, for every byte in the space.
+    for b in 0..256
+        test.assert_eq(gatt.properties_byte(gatt.properties_of(b)), b)
+
+@test
+fn test_the_client_configuration_is_two_bytes_and_two_flags()
+    // Notify is bit 0 and indicate bit 1; the rest is reserved, and
+    // both false is the value that turns a subscription off.
+    let off = gatt.client_configuration_value(GattClientConfiguration {
+        notify: false,
+        indicate: false })
+    test.assert_eq(list.len(off), 2)
+    test.assert_eq(off[0] as Int, 0x00)
+    test.assert_eq(off[1] as Int, 0x00)
+    let both = gatt.client_configuration_value(GattClientConfiguration {
+        notify: true,
+        indicate: true })
+    test.assert_eq(both[0] as Int, 0x03)
+    test.assert_eq(both[1] as Int, 0x00)
+
+@test
+fn test_the_client_configuration_refuses_a_wrong_length_or_a_reserved_bit()
+    // One byte where two are needed.
+    match gatt.read_client_configuration([0x01 as u8])
+        Ok(_)  => test.fail("a configuration is two bytes")
+        Err(e) =>
+            match e
+                AttPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 2)
+                _                          => test.fail("one byte is short of two")
+    // Three where two are needed.
+    match gatt.read_client_configuration([0x01 as u8, 0x00 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("a configuration is two bytes")
+        Err(e) =>
+            match e
+                AttRaggedList(unit, actual) =>
+                    test.assert_eq(unit, 2)
+                    test.assert_eq(actual, 3)
+                _                           => test.fail("three bytes are a ragged pair")
+    // Bits above the two defined ones are reserved, and a write that
+    // sets one is refused rather than masked away.
+    match gatt.read_client_configuration([0x04 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("0x0004 is not a flag")
+        Err(e) =>
+            match e
+                AttRaggedList(unit, actual) =>
+                    test.assert_eq(unit, 0)
+                    test.assert_eq(actual, 4)
+                _                           => test.fail("a reserved bit is ragged with no width")
+    // And the two flags it does define come back as themselves.
+    match gatt.read_client_configuration([0x03 as u8, 0x00 as u8])
+        Err(_) => test.fail("notify and indicate are both defined")
+        Ok(c)  =>
+            test.assert(c.notify)
+            test.assert(c.indicate)
+    // The value the package writes is the value it reads.
+    let written = gatt.client_configuration_value(GattClientConfiguration {
+        notify: true,
+        indicate: false })
+    match gatt.read_client_configuration(written)
+        Err(_) => test.fail("what encode wrote, decode reads")
+        Ok(c)  =>
+            test.assert(c.notify)
+            test.assert(not c.indicate)
+
+@test
+fn test_a_characteristic_declaration_reads_both_uuid_widths()
+    // The value is properties, value handle and UUID: five bytes with
+    // the 16-bit spelling of the type, nineteen with the 128-bit one.
+    let short: [u8] = [0x12 as u8, 0x10 as u8, 0x00 as u8, 0x37 as u8, 0x2A as u8]
+    match gatt.read_characteristic_declaration(0x000F, short)
+        Err(_) => test.fail("five bytes are a whole declaration")
+        Ok(c)  =>
+            test.assert_eq(c.declaration_handle, 0x000F)
+            test.assert_eq(c.value_handle, 0x0010)
+            test.assert(c.properties.read)
+            test.assert(c.properties.notify)
+            test.assert(not c.properties.write)
+            match c.uuid
+                AttUuid16(v) => test.assert_eq(v, 0x2A37)
+                _            => test.fail("a five-byte value carries a 16-bit uuid")
+    let long: [u8] = [0x02 as u8, 0x10 as u8, 0x00 as u8,
+                      0xFB as u8, 0x34 as u8, 0x9B as u8, 0x5F as u8,
+                      0x80 as u8, 0x00 as u8, 0x00 as u8, 0x80 as u8,
+                      0x00 as u8, 0x10 as u8, 0x00 as u8, 0x00 as u8,
+                      0x29 as u8, 0x2A as u8, 0x00 as u8, 0x00 as u8]
+    match gatt.read_characteristic_declaration(0x000F, long)
+        Err(_) => test.fail("nineteen bytes are a whole declaration")
+        Ok(c)  =>
+            test.assert_eq(c.value_handle, 0x0010)
+            test.assert(c.properties.read)
+            match c.uuid
+                AttUuid128(bytes) => test.assert_eq(list.len(bytes), 16)
+                _                 => test.fail("a nineteen-byte value carries a 128-bit uuid")
+    // A UUID field of neither width is the one thing this call refuses,
+    // and a value too short to hold the field is the other.
+    match gatt.read_characteristic_declaration(0x000F,
+            [0x02 as u8, 0x10 as u8, 0x00 as u8, 0x29 as u8, 0x2A as u8, 0x00 as u8])
+        Ok(_)  => test.fail("three bytes are neither uuid width")
+        Err(e) =>
+            match e
+                AttBadUuidLength(n) => test.assert_eq(n, 3)
+                _                   => test.fail("the refusal names the field's length")
+    match gatt.read_characteristic_declaration(0x000F, [0x02 as u8, 0x10 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("three bytes are not a declaration")
+        Err(e) =>
+            match e
+                AttPduTooShort(have, need) =>
+                    test.assert_eq(have, 3)
+                    test.assert_eq(need, 5)
+                _                          => test.fail("three bytes are short of five")
+
+@test
+fn test_a_service_declaration_reads_both_uuid_widths()
+    let short: [u8] = [0x0A as u8, 0x18 as u8]
+    match gatt.read_service_declaration(0x0001, 0x0005, true, short)
+        Err(_) => test.fail("two bytes are a 16-bit service uuid")
+        Ok(s)  =>
+            test.assert_eq(s.declaration_handle, 0x0001)
+            test.assert_eq(s.end_group_handle, 0x0005)
+            test.assert(s.primary)
+            match s.uuid
+                AttUuid16(v) => test.assert_eq(v, 0x180A)
+                _            => test.fail("two bytes are a 16-bit uuid")
+    let long: [u8] = [0xFB as u8, 0x34 as u8, 0x9B as u8, 0x5F as u8,
+                      0x80 as u8, 0x00 as u8, 0x00 as u8, 0x80 as u8,
+                      0x00 as u8, 0x10 as u8, 0x00 as u8, 0x00 as u8,
+                      0x0D as u8, 0x18 as u8, 0x00 as u8, 0x00 as u8]
+    match gatt.read_service_declaration(0x0001, 0x0002, false, long)
+        Err(_) => test.fail("sixteen bytes are a 128-bit service uuid")
+        Ok(s)  =>
+            test.assert(not s.primary)
+            match s.uuid
+                AttUuid128(bytes) => test.assert_eq(list.len(bytes), 16)
+                _                 => test.fail("sixteen bytes are a 128-bit uuid")
+    match gatt.read_service_declaration(0x0001, 0x0002, true,
+            [0x00 as u8, 0x28 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("three bytes are neither uuid width")
+        Err(e) =>
+            match e
+                AttBadUuidLength(n) => test.assert_eq(n, 3)
+                _                   => test.fail("the refusal names the field's length")
+
+@test
+fn test_the_declaration_walks_round_trip_through_the_database()
+    // A profile written as declarations becomes rows, is walked, and
+    // the walk's own bytes read back as the declarations it started
+    // from: the whole loop, over both spellings and both service kinds.
+    let service = GattService {
+        declaration_handle: 0x0001,
+        end_group_handle: 0x0005,
+        uuid: AttUuid16(0x180A),
+        primary: true }
+    let secondary = GattService {
+        declaration_handle: 0x0006,
+        end_group_handle: 0x0008,
+        uuid: AttUuid128(full_2a29()),
+        primary: false }
+    let characteristic = GattCharacteristic {
+        declaration_handle: 0x0002,
+        value_handle: 0x0003,
+        properties: gatt.properties_of(0x02),
+        uuid: AttUuid16(0x2A29) }
+    let descriptor = GattDescriptor { handle: 0x0004, uuid: AttUuid16(0x2902) }
+    let rows = table([
+        gatt.service_attribute(service),
+        gatt.characteristic_attribute(characteristic),
+        gatt.characteristic_value_attribute(characteristic, [0x6E as u8, 0x6F as u8],
+                                            writable()),
+        gatt.descriptor_attribute(descriptor, [0x01 as u8, 0x00 as u8], writable()),
+        gatt.service_attribute(secondary)])
+    test.assert_eq(att.attribute_count(rows), 5)
+    // The primary service's row is what Read By Group Type reports.
+    match att.read_by_group_type(rows, 0x0001, 0x0005, AttUuid16(0x2800), 517)
+        ReadByGroupTypeResponse(triplet, data) =>
+            test.assert_eq(triplet, 6)
+            match att.decode_uuid(att.attributes_in_range(rows, 0x0001, 0x0005)[0].value)
+                Err(_)   => test.fail("a service declaration's value is a uuid")
+                Ok(uuid) =>
+                    test.assert(att.uuid_eq(uuid, AttUuid16(0x180A)))
+        _                                      => test.fail("the primary service is a grouping attribute")
+    // The characteristic's declaration reads back as itself.
+    let declared = att.attributes_in_range(rows, 0x0002, 0x0002)[0]
+    match gatt.read_characteristic_declaration(0x0002, declared.value)
+        Err(_) => test.fail("the row carries its own declaration")
+        Ok(c)  =>
+            test.assert_eq(c.value_handle, 0x0003)
+            test.assert(c.properties.read)
+            test.assert(att.uuid_eq(c.uuid, AttUuid16(0x2A29)))
+    // The secondary service is a 0x2801 row, and its value is the long
+    // spelling of the UUID it was written with.
+    let second = att.attributes_in_range(rows, 0x0006, 0x0006)[0]
+    match att.read(rows, 0x0006, 517)
+        ReadResponse(value) => test.assert_eq(list.len(value), 16)
+        _                   => test.fail("the secondary service's value is its uuid")
+    match second.attribute_type
+        AttUuid16(v) => test.assert_eq(v, gatt.UUID_SECONDARY_SERVICE)
+        _            => test.fail("the secondary service's type is 0x2801")
+    // The declaration rows are readable and not writable, and the
+    // value rows carry the permissions the caller passed.
+    test.assert(not second.permissions.writable)
+    let value = att.attributes_in_range(rows, 0x0003, 0x0003)[0]
+    test.assert(value.permissions.writable)
+    // A characteristic value row carries the characteristic's own type
+    // and the value handle, which is the handle a client reads.
+    match value.attribute_type
+        AttUuid16(v) => test.assert_eq(v, 0x2A29)
+        _            => test.fail("a characteristic's value row is its type")
+    test.assert_eq(value.handle, characteristic.value_handle)

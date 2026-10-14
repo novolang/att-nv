@@ -1,11 +1,5 @@
 // tests/att_tests.nv — the API tests, written against the signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// att.<fn>` from the `todo()` that is each body.  That is the expected
-// state of an interface release: the compiler has checked every
-// signature, every type and every effect row, and nothing else has been
-// checked because there is nothing else yet.
-//
 // The byte strings are the specification's own, Core Vol 3 Part F § 3.4
 // and the Vol 3 Part G profile they discover: the Exchange MTU pair,
 // the Error Response layout, and the Read By Group Type response that

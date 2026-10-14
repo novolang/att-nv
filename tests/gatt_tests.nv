@@ -1,9 +1,6 @@
 // tests/gatt_tests.nv — the API tests for the declarations, written
 // against the signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// gatt.<fn>` from the `todo()` that is each body.
-//
 // The byte strings are Core Vol 3 Part G § 3: the characteristic
 // declaration whose value is properties, value handle and UUID, and the
 // Client Characteristic Configuration descriptor a client writes to

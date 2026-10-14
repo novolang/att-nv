@@ -1,15 +1,10 @@
 [package]
 name        = "att-nv"
-version     = "0.0.2"
-description = "The Bluetooth Attribute Protocol with no radio: every ATT PDU as a typed value both directions, the MTU exchange, and the attribute-database walk a GATT server performs as arithmetic over a database the caller holds.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "The Bluetooth Attribute Protocol with no radio: every ATT PDU as a typed value both directions, the MTU exchange, and the attribute-database walk a GATT server performs as arithmetic over a database the caller holds."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `core`: PDUs to and from bytes, and a database walk that is index
 # arithmetic over a value the caller owns.  Nothing is read, nothing is
@@ -21,7 +16,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "att", "gatt", "attribute-protocol", "codec", "sans-io", "embedded"]
 repository  = "https://github.com/novolang/att-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.20.2"
 
 [docs.pages]
 "README.md" = "Attributes and their protocol, without a radio"
@@ -31,11 +26,12 @@ novo        = ">= 0.8.9"
 # l2cap-nv's `L2capFrame` so that the two packages share one spelling of
 # a channel and a payload rather than each declaring its own.
 #
-# A PATH dependency, because both packages are being developed together
-# and neither is on the registry yet.  `novo pkg publish` refuses a path
-# dependency — the tarball would carry the path and send every consumer
-# to a directory that is not on their machine — so this becomes
-# `l2cap-nv = "^0.0.1"` the moment l2cap-nv is published, and l2cap-nv is
-# published first because a package cannot be published ahead of what it
-# depends on.
-l2cap-nv = "^0.0.1"
+# l2cap-nv is a SIBLING PATH, `path = "../l2cap-nv"`, while the two
+# packages are developed in one checkout; the registry's newest is its
+# interface-only 0.0.2, whose every call panics.  `novo pkg publish`
+# refuses a path — a tarball carrying one sends every consumer to a
+# directory that is not on their machine — so the line becomes the
+# registry range l2cap-nv is published at, which is `^0.1.0`, the
+# version it is at in this checkout.  l2cap-nv is published first: a
+# package cannot be published ahead of what it depends on.
+l2cap-nv = { path = "../l2cap-nv" }

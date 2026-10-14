@@ -12,12 +12,6 @@ on that package for it.
 [smp-nv](https://novo-lang.org/packages/smp-nv) is its sibling, the
 Security Manager, on the next channel along.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What the Attribute Protocol is
 
 A device that has something to publish holds a table. Each row is an
@@ -129,10 +123,7 @@ fn main() [io]
                         _ => println("some other request")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented: att.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -227,12 +218,16 @@ anywhere else in this family: the device on a coin cell is usually the
 server.
 
 ```bash
-novo build --target=nrf52-qemu src/main.nv
+novo build --target=nrf52-qemu src/probe.nv
 ```
 
-`tests/embedded_probe.nv` is that claim as a program that either builds
-or does not. It builds, producing a Cortex-M4 executable from the probe,
-this package, l2cap-nv and hci-codec-nv.
+which produces a Cortex-M4 executable from the probe, this package,
+l2cap-nv and hci-codec-nv, or fails. The probe has to be built from
+`src/`: `novo build` of a file that is not a package's `main` resolves
+the package's `src/` siblings but does not read `[dependencies]`, and a
+board build of a file directly under `src/` does read them. Building
+`tests/embedded_probe.nv` where it sits therefore fails on the names
+l2cap-nv declares, not on anything about this package's tier.
 
 A device cannot write a UUID down. `AttUuid` has two variants because
 the wire distinguishes the two widths everywhere, and at the embedded
@@ -256,7 +251,7 @@ from the connection.
   and a package that held it would be holding a connection.
 - **The Read Multiple Variable pair, 0x20 and 0x21, and Multiple Handle
   Value Notification, 0x23.** All three are Bluetooth 5.2's.
-  `AttHandleValue` is declared for them and nothing decodes into it yet.
+  `AttHandleValue` is declared for them and nothing decodes into it.
 - **Signature verification.** A Signed Write Command carries its twelve
   signature bytes and this package hands them over. Checking them is a
   connection-signature-resolving-key operation that belongs beside
@@ -289,9 +284,12 @@ from the connection.
 ## Tests
 
 ```bash
-novo test tests/att_tests.nv      # 32 tests against the signatures
-novo test tests/gatt_tests.nv     # 12 tests over the declarations
+novo test tests/att_tests.nv       # 32 tests against the signatures
+novo test tests/gatt_tests.nv      # 12 tests over the declarations
+novo test tests/att_edge_tests.nv  # 39 tests, the edges the API suites leave
 ```
+
+All three suites are green, 83 tests in all.
 
 The byte strings the suite asserts against are the Bluetooth Core
 Specification's own, Volume 3 Part F section 3.4: the Exchange MTU pair,
@@ -303,29 +301,13 @@ end-group handle, two characteristic declarations, and two values of
 different lengths. The GATT suite checks the declarations of Volume 3
 Part G section 3 against the bytes a response carries.
 
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `att.CID`, `.MTU_DEFAULT`, `.MTU_MINIMUM`; every `gatt.UUID_*` | yes (they are constants) |
-| `att.negotiated_mtu` | no |
-| `att.encode_uuid`, `.decode_uuid`, `.uuid_eq` | no |
-| `att.error_code_value`, `.error_code_of` | no |
-| `att.encode`, `.decode`, `.opcode`, `.opcode_method`, `.opcode_is_command`, `.opcode_is_signed`, `.is_request` | no |
-| `att.frame`, `.from_frame` | no |
-| `att.database`, `.attribute_count`, `.attribute_at`, `.handle_range`, `.attributes_in_range` | no |
-| `att.find_information`, `.find_by_type_value`, `.read_by_type`, `.read_by_group_type` | no |
-| `att.read`, `.read_blob`, `.read_multiple` | no |
-| `att.permission_error`, `.write` | no |
-| `att.AttDecodeError.message` | no |
-| `gatt.properties_byte`, `.properties_of` | no |
-| `gatt.service_declaration_value`, `.characteristic_declaration_value`, `.client_configuration_value` | no |
-| `gatt.read_characteristic_declaration`, `.read_service_declaration`, `.read_client_configuration` | no |
-| `gatt.service_attribute`, `.characteristic_attribute`, `.characteristic_value_attribute`, `.descriptor_attribute` | no |
+The edge suite takes what the API suites do not: the round trip of all
+twenty-eight PDUs at every opcode, the sentence each `AttDecodeError`
+answers and the byte every `AttErrorCode` names, the width change that
+stops a Read By Type or a Find Information response part way, the
+300-byte cap a value is held to in a triplet and a pair, the permission
+rule one requirement at a time, and a whole profile written with `gatt`
+and then walked with `att`.
 
 ## Licence
 
