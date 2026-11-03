@@ -16,7 +16,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "att", "gatt", "attribute-protocol", "codec", "sans-io", "embedded"]
 repository  = "https://github.com/novolang/att-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.20.2"
+novo        = ">= 0.23.0"
 
 [docs.pages]
 "README.md" = "Attributes and their protocol, without a radio"
@@ -26,12 +26,7 @@ novo        = ">= 0.20.2"
 # l2cap-nv's `L2capFrame` so that the two packages share one spelling of
 # a channel and a payload rather than each declaring its own.
 #
-# l2cap-nv is a SIBLING PATH, `path = "../l2cap-nv"`, while the two
-# packages are developed in one checkout; the registry's newest is its
-# interface-only 0.0.2, whose every call panics.  `novo pkg publish`
-# refuses a path — a tarball carrying one sends every consumer to a
-# directory that is not on their machine — so the line becomes the
-# registry range l2cap-nv is published at, which is `^0.1.0`, the
-# version it is at in this checkout.  l2cap-nv is published first: a
-# package cannot be published ahead of what it depends on.
-l2cap-nv = { path = "../l2cap-nv" }
+# l2cap-nv comes from the registry at its 0.1.0 release, whose bodies are
+# implemented.  Its earlier interface-only 0.0.2 answered every call with
+# a panic.
+l2cap-nv = "^0.1.0"

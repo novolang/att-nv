@@ -86,6 +86,12 @@ written and verified against.  The 0.8.9 floor was true of the interface
 — `todo()` bodies build anywhere — and false of the implementation, and
 a floor set too low fails as a wrong answer rather than a build error.
 
+This release requires novo 0.23.0 or later.
+
+## 0.0.3 — 2026-10-25
+
+A file that names a sibling module's type, function or constant now has the `use` line for that module (E2033, E2003).  No signature and no behaviour changed.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
