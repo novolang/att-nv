@@ -4,6 +4,11 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.1 — 2026-11-09
+
+Withdrawn: The ATT and GATT PDU codecs moved into ble-codec-nv; the noble stack builds on it.  `novo pkg add att-nv` now refuses and names `ble-codec-nv`; a project that already depends on this
+package keeps building.  No source changed.
+
 ## 0.1.0 — 2026-10-10
 
 The **implementation**.  Every body the 0.0.2 interface published is
